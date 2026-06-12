@@ -15,7 +15,16 @@ final class ChordInputValidationTests: XCTestCase {
         let result = ChordInputValidator.validateM4GDeviceInput("nope!", existingChords: [])
 
         XCTAssertFalse(result.isValid)
+        XCTAssertEqual(result.tokens, ["nope!"])
         XCTAssertTrue(result.errors.contains("Unsupported M4G action in chord input."))
+    }
+
+    func testCompactApostropheInputSplitsIntoPhysicalTokens() {
+        let result = ChordInputValidator.validateM4GDeviceInput("apg'", existingChords: [])
+
+        XCTAssertTrue(result.isValid, result.errors.joined(separator: ", "))
+        XCTAssertEqual(result.tokens, ["a", "p", "g", "'"])
+        XCTAssertNotNil(result.rawInputActions)
     }
 
     func testDuplicateTokenIsRejected() {

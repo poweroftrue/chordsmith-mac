@@ -50,12 +50,11 @@ public enum ChordInputValidator {
             return ["dup"]
         }
 
-        if normalized.count > 1,
-           normalized.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) }) {
+        if let compactTokens = compactM4GCharacterTokens(from: normalized) {
             if compactRepeatsUseDup {
-                return tokensReplacingCompactRepeatsWithDup(normalized)
+                return tokensReplacingCompactRepeatsWithDup(compactTokens)
             }
-            return normalized.map { String($0) }
+            return compactTokens
         }
 
         return [normalized]
@@ -149,15 +148,24 @@ public enum ChordInputValidator {
         token.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    private static func tokensReplacingCompactRepeatsWithDup(_ text: String) -> [String] {
-        var seen: Set<Character> = []
+    private static func compactM4GCharacterTokens(from text: String) -> [String]? {
+        let tokens = text.map { String($0) }
+        guard tokens.count > 1,
+              tokens.allSatisfy({ M4GPhysicalModel.defaultA1.bestPlacement(for: $0) != nil }) else {
+            return nil
+        }
+        return tokens
+    }
+
+    private static func tokensReplacingCompactRepeatsWithDup(_ tokens: [String]) -> [String] {
+        var seen: Set<String> = []
         var output: [String] = []
-        for character in text {
-            if seen.contains(character) {
+        for token in tokens {
+            if seen.contains(token) {
                 output.append("dup")
             } else {
-                seen.insert(character)
-                output.append(String(character))
+                seen.insert(token)
+                output.append(token)
             }
         }
         return output
