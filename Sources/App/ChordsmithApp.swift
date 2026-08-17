@@ -6,13 +6,13 @@ import Library
 import SwiftUI
 
 @main
-struct CharaworderApp: App {
+struct ChordsmithApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
         Settings {
             SettingsView(model: appDelegate.model)
-                .frame(width: 420, height: 340)
+                .frame(width: 440, height: 460)
         }
     }
 }
@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        model.stop()
         if let globalControlMonitor {
             NSEvent.removeMonitor(globalControlMonitor)
             self.globalControlMonitor = nil
@@ -57,10 +58,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        model.refreshLaunchAtLoginStatus()
+        model.resumeInputObservationIfNeeded()
+    }
+
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "keyboard.badge.ellipsis", accessibilityDescription: "Charaworder")
+            button.image = NSImage(systemSymbolName: "keyboard.badge.ellipsis", accessibilityDescription: "Chordsmith")
             button.action = #selector(togglePopover)
             button.target = self
         }
@@ -196,10 +202,8 @@ extension KeyboardShortcuts.Name {
 struct RootView: View {
     @ObservedObject var model: AppModel
     @State private var searchText = ""
-    @State private var addInput = ""
-    @State private var addOutput = ""
-    @State private var addProfile: ErgonomicProfile = .ansiQwerty
-    @State private var addTarget: DeploymentTarget = .software
+    @StateObject private var addController = QuickChordAddController()
+    @State private var addFocusToken = 0
     @State private var advisorWord = ""
     @State private var selectedChordID: UUID?
     @State private var selectedAdvisorCandidateID: String?
@@ -208,8 +212,6 @@ struct RootView: View {
     private enum FocusField: Hashable {
         case librarySearch
         case advisorWord
-        case addInput
-        case addOutput
     }
 
     private var filteredChords: [ChordEntry] {
@@ -237,6 +239,9 @@ struct RootView: View {
                 suggestionsTab
                     .tabItem { Label("Suggestions", systemImage: "sparkles") }
                     .tag(PanelTab.suggestions)
+                usageTab
+                    .tabItem { Label("Usage", systemImage: "chart.bar.xaxis") }
+                    .tag(PanelTab.usage)
             }
             .padding(12)
         }
@@ -270,7 +275,7 @@ struct RootView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Charaworder")
+                    Text("Chordsmith")
                         .font(.title2.weight(.semibold))
                     Text(model.statusText)
                         .font(.caption)
@@ -286,8 +291,8 @@ struct RootView: View {
                 Button("Export JSON") {
                     Task { await model.exportChordJSON() }
                 }
-                Button("Settings") {
-                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                Button("Exit") {
+                    NSApp.terminate(nil)
                 }
             }
 
@@ -352,14 +357,17 @@ struct RootView: View {
                             Text("\(chord.profile.displayName) • \(chord.deploymentTarget.displayName) • \(chord.source)")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+                            if !chord.enabled {
+                                Text("Disabled")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.secondary.opacity(0.16), in: Capsule())
+                            }
                         }
                         Spacer()
                         starButton(for: chord)
-                        Toggle("", isOn: Binding(
-                            get: { chord.enabled },
-                            set: { newValue in Task { await model.setChordEnabled(chord, enabled: newValue) } }
-                        ))
-                        .labelsHidden()
                         Button(role: .destructive) {
                             Task { await model.deleteChord(chord) }
                         } label: {
@@ -488,38 +496,25 @@ struct RootView: View {
     }
 
     private var addTab: some View {
-        Form {
-            Section("Chord Input") {
-                TextField("a,s,d or a+s+d", text: $addInput)
-                    .focused($focusedField, equals: .addInput)
-                Text("Use normalized physical key tokens. Commas and plus signs are both accepted.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Output") {
-                TextField("Expanded text or key combo", text: $addOutput)
-                    .focused($focusedField, equals: .addOutput)
-            }
-
-            Section("Routing") {
-                Picker("Profile", selection: $addProfile) {
-                    ForEach(ErgonomicProfile.allCases.filter { $0 != .cc2A1 || addTarget != .software }, id: \.self) { profile in
-                        Text(profile.displayName).tag(profile)
-                    }
+        VStack(alignment: .leading, spacing: 0) {
+            QuickChordAddView(
+                model: model,
+                controller: addController,
+                showsCancel: true,
+                contentPadding: 0,
+                focusToken: addFocusToken,
+                initialFocus: .output,
+                onCancel: {
+                    addController.reset()
+                    addFocusToken += 1
+                },
+                onCommitSuccess: {
+                    addController.reset()
+                    addFocusToken += 1
                 }
-                Picker("Deployment", selection: $addTarget) {
-                    ForEach(DeploymentTarget.allCases, id: \.self) { target in
-                        Text(target.displayName).tag(target)
-                    }
-                }
-            }
-
-            Button("Save Chord") {
-                saveAddChord()
-            }
+            )
+            Spacer(minLength: 0)
         }
-        .formStyle(.grouped)
     }
 
     private var stagedTab: some View {
@@ -591,13 +586,19 @@ struct RootView: View {
                                     Text(candidate.inputKeys.joined(separator: "+"))
                                         .font(.system(.subheadline, design: .monospaced))
                                     Spacer()
-                                    Text(String(format: "%.1f", candidate.score))
-                                        .font(.caption)
-                                    Button("Software") {
-                                        Task { await model.acceptSuggestion(suggestion, candidate: candidate, target: .software) }
-                                    }
-                                    Button("Both") {
-                                        Task { await model.acceptSuggestion(suggestion, candidate: candidate, target: .both) }
+                                    if suggestion.acceptedChordId != nil {
+                                        Label("Use this chord", systemImage: "checkmark.circle.fill")
+                                            .font(.caption)
+                                            .foregroundStyle(.green)
+                                    } else {
+                                        Text(String(format: "%.1f", candidate.score))
+                                            .font(.caption)
+                                        Button("Software") {
+                                            Task { await model.acceptSuggestion(suggestion, candidate: candidate, target: .software) }
+                                        }
+                                        Button("Both") {
+                                            Task { await model.acceptSuggestion(suggestion, candidate: candidate, target: .both) }
+                                        }
                                     }
                                 }
                                 if !candidate.softReasons.isEmpty {
@@ -621,6 +622,274 @@ struct RootView: View {
         }
     }
 
+    private var usageTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Label(
+                        model.inputObserver.isRunning ? "Recorder running" : "Recorder paused",
+                        systemImage: model.inputObserver.isRunning ? "record.circle" : "pause.circle"
+                    )
+                    .foregroundStyle(model.inputObserver.isRunning ? .green : .secondary)
+                    Text(model.inputObserver.attributionStatusText)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if model.inputObserver.needsInputMonitoringPermission {
+                    Button("Input Monitoring…") {
+                        model.openInputMonitoringSettings()
+                    }
+                }
+                Button(model.inputObserver.isRunning ? "Pause" : "Resume") {
+                    model.toggleInputObservation()
+                }
+                Button("Refresh") {
+                    Task { await model.loadUsageReport() }
+                }
+            }
+            .font(.caption)
+
+            HStack(spacing: 10) {
+                Picker(
+                    "Language",
+                    selection: Binding(
+                        get: { model.usageLanguageFilter },
+                        set: { model.setUsageLanguageFilter($0) }
+                    )
+                ) {
+                    Text("All languages").tag(Optional<WordLanguage>.none)
+                    Text("English").tag(Optional(WordLanguage.english))
+                    Text("العربية").tag(Optional(WordLanguage.arabic))
+                    Text("Mixed").tag(Optional(WordLanguage.mixed))
+                }
+                .labelsHidden()
+
+                Picker(
+                    "Period",
+                    selection: Binding(
+                        get: { model.usageCoverageDays },
+                        set: { model.setUsageCoverageDays($0) }
+                    )
+                ) {
+                    Text("7 days").tag(Optional(7))
+                    Text("30 days").tag(Optional(30))
+                    Text("All time").tag(Optional<Int>.none)
+                }
+                .labelsHidden()
+                Spacer()
+                Text("Exact enabled M4G outputs count as covered")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
+                GridRow {
+                    usageMetric("Today", words: model.usageOverview.wordsToday, chords: model.usageOverview.chordsToday)
+                    usageMetric("7 days", words: model.usageOverview.words7Days, chords: model.usageOverview.chords7Days)
+                }
+                GridRow {
+                    usageMetric("30 days", words: model.usageOverview.words30Days, chords: model.usageOverview.chords30Days)
+                    usageMetric("All time", words: model.usageOverview.wordsAllTime, chords: model.usageOverview.chordsAllTime)
+                }
+            }
+
+            HStack(spacing: 8) {
+                coverageMetric(
+                    "Chord coverage",
+                    value: model.wordCoverageReport.coverageRate.formatted(.percent.precision(.fractionLength(1))),
+                    detail: "\(model.wordCoverageReport.coveredOccurrences) of \(model.wordCoverageReport.totalOccurrences) uses"
+                )
+                coverageMetric(
+                    "Covered words",
+                    value: "\(model.wordCoverageReport.coveredUniqueWords)",
+                    detail: "of \(model.wordCoverageReport.uniqueWords) unique"
+                )
+                coverageMetric(
+                    "Needs a chord",
+                    value: "\(model.wordCoverageReport.uncoveredUniqueWords)",
+                    detail: "\(model.wordCoverageReport.uncoveredOccurrences) uses"
+                )
+            }
+
+            List {
+                Section("Most used without an M4G chord") {
+                    if model.wordCoverageReport.uncoveredWords.isEmpty {
+                        Text("No uncovered words in this filter.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(model.wordCoverageReport.uncoveredWords.prefix(15)) { usage in
+                            coverageWordRow(usage)
+                        }
+                    }
+                }
+
+                Section("Most used with an M4G chord") {
+                    if model.wordCoverageReport.coveredWords.isEmpty {
+                        Text("No covered words in this filter.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(model.wordCoverageReport.coveredWords.prefix(15)) { usage in
+                            coverageWordRow(usage)
+                        }
+                    }
+                }
+
+                Section("Two-key impact") {
+                    if model.twoKeyChordImpact.isEmpty {
+                        Text("No two-key usage recorded yet.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(model.twoKeyChordImpact.prefix(12)) { impact in
+                            HStack(alignment: .top, spacing: 10) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(impact.chord.output)
+                                        .font(.headline)
+                                    ActionTokenRow(tokens: impact.chord.displayInput.isEmpty ? impact.chord.inputKeys : impact.chord.displayInput)
+                                    Text(usageDetail(
+                                        total: impact.totalFrequency,
+                                        seven: impact.frequency7Days,
+                                        thirty: impact.frequency30Days,
+                                        confidence: impact.confidence,
+                                        ambiguity: impact.ambiguityCount
+                                    ))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text("\(impact.totalFrequency)")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 3)
+                        }
+                    }
+                }
+
+                Section("Recent chords") {
+                    if model.recentChordUsage.isEmpty {
+                        Text("No chord usage recorded yet.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(model.recentChordUsage.prefix(10)) { usage in
+                            usageRow(
+                                title: usage.output,
+                                subtitle: "\(usage.source.displayName) • \(usage.confidence.displayName) • \(usage.day)",
+                                frequency: usage.frequency
+                            )
+                        }
+                    }
+                }
+
+                Section("Recent words") {
+                    if model.recentWordUsage.isEmpty {
+                        Text("No word usage recorded yet.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(model.recentWordUsage.prefix(10)) { usage in
+                            usageRow(
+                                title: usage.word,
+                                subtitle: "\(usage.language.displayName) • \(usage.source.displayName) • \(usage.day)",
+                                frequency: usage.frequency
+                            )
+                        }
+                    }
+                }
+            }
+            .listStyle(.plain)
+        }
+        .onAppear {
+            Task { await model.loadUsageReport() }
+        }
+    }
+
+    private func usageMetric(_ title: String, words: Int, chords: Int) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+            Text("\(words) words")
+            Text("\(chords) chords")
+        }
+        .font(.caption)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func coverageMetric(_ title: String, value: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.headline.monospacedDigit())
+            Text(detail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func coverageWordRow(_ usage: WordCoverageStat) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(usage.word)
+                    .font(.headline)
+                    .environment(\.layoutDirection, usage.language == .arabic ? .rightToLeft : .leftToRight)
+                HStack(spacing: 5) {
+                    Text(usage.language.displayName)
+                    if let chord = usage.matchingChords.first {
+                        Text("•")
+                        Text(chord.normalizedInput)
+                            .fontDesign(.monospaced)
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text("\(usage.frequency)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 3)
+    }
+
+    private func usageRow(title: String, subtitle: String, frequency: Int) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline)
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text("\(frequency)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 3)
+    }
+
+    private func usageDetail(
+        total: Int,
+        seven: Int,
+        thirty: Int,
+        confidence: ChordUsageConfidence?,
+        ambiguity: Int
+    ) -> String {
+        var parts = ["7d \(seven)", "30d \(thirty)", "total \(total)"]
+        if let confidence {
+            parts.append(confidence.displayName)
+        }
+        if ambiguity > 1 {
+            parts.append("\(ambiguity) matching outputs")
+        }
+        return parts.joined(separator: " • ")
+    }
+
     private func handleShortcut(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let hasCommand = modifiers.contains(.command)
@@ -628,6 +897,30 @@ struct RootView: View {
         let hasControl = modifiers.contains(.control)
         let hasShift = modifiers.contains(.shift)
         let key = event.charactersIgnoringModifiers?.lowercased()
+
+        if model.selectedTab == .add {
+            if addController.handleCapture(event) {
+                addFocusToken += 1
+                return true
+            }
+
+            if !hasCommand, !hasOption, !hasControl, !hasShift {
+                if event.keyCode == 125, !addController.quickCandidates.isEmpty {
+                    addController.cycleQuickCandidate(delta: 1)
+                    addFocusToken += 1
+                    return true
+                }
+                if event.keyCode == 126, !addController.quickCandidates.isEmpty {
+                    addController.cycleQuickCandidate(delta: -1)
+                    addFocusToken += 1
+                    return true
+                }
+                if event.keyCode == 36 {
+                    saveMenuQuickChord()
+                    return true
+                }
+            }
+        }
 
         if hasCommand, !hasOption, !hasControl, !hasShift {
             switch key {
@@ -645,6 +938,9 @@ struct RootView: View {
                 return true
             case "5":
                 model.selectedTab = .suggestions
+                return true
+            case "6":
+                model.selectedTab = .usage
                 return true
             case "f", "k":
                 focusDefaultField(for: model.selectedTab)
@@ -686,8 +982,9 @@ struct RootView: View {
             case .advisor:
                 focusedField = .advisorWord
             case .add:
-                focusedField = .addInput
-            case .staged, .suggestions:
+                focusedField = nil
+                addFocusToken += 1
+            case .staged, .suggestions, .usage:
                 focusedField = nil
             }
         }
@@ -706,11 +1003,13 @@ struct RootView: View {
                 Task { await model.adviseChord(for: advisorWord) }
             }
         case .add:
-            saveAddChord()
+            saveMenuQuickChord()
         case .staged:
             Task { await model.commitStagedChanges() }
         case .suggestions:
             Task { await model.regenerateSuggestions() }
+        case .usage:
+            Task { await model.loadUsageReport() }
         }
     }
 
@@ -719,11 +1018,12 @@ struct RootView: View {
         return model.advisorCandidates.first { $0.id == selectedAdvisorCandidateID }
     }
 
-    private func saveAddChord() {
+    private func saveMenuQuickChord() {
         Task {
-            await model.addChord(input: addInput, output: addOutput, profile: addProfile, deploymentTarget: addTarget)
-            addInput = ""
-            addOutput = ""
+            await addController.quickSave(model: model) {
+                addController.reset()
+                addFocusToken += 1
+            }
         }
     }
 
@@ -881,6 +1181,25 @@ struct SettingsView: View {
                     Text(ErgonomicProfile.ansiQwerty.displayName).tag(ErgonomicProfile.ansiQwerty)
                     Text(ErgonomicProfile.ansiColemak.displayName).tag(ErgonomicProfile.ansiColemak)
                     Text(ErgonomicProfile.ansiColemakDH.displayName).tag(ErgonomicProfile.ansiColemakDH)
+                }
+            }
+
+            Section("Startup") {
+                Toggle(
+                    "Launch Chordsmith at login",
+                    isOn: Binding(
+                        get: { model.launchAtLoginEnabled },
+                        set: { model.setLaunchAtLoginEnabled($0) }
+                    )
+                )
+                .disabled(!model.canManageLaunchAtLogin)
+                Text(model.launchAtLoginStatusText)
+                    .font(.caption)
+                    .foregroundStyle(model.launchAtLoginNeedsApproval ? .orange : .secondary)
+                if model.launchAtLoginNeedsApproval {
+                    Button("Open Login Items Settings") {
+                        model.openLoginItemSettings()
+                    }
                 }
             }
 

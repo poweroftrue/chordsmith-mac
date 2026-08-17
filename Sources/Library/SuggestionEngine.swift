@@ -40,6 +40,11 @@ private struct CandidateHint: Sendable {
     }
 }
 
+private struct ConflictFallbackCandidate: Sendable {
+    let inputKeys: [String]
+    let usesSymbolNamespace: Bool
+}
+
 private struct StarredStyleModel: Sendable {
     private struct Shape: Sendable {
         let length: Int
@@ -233,11 +238,16 @@ public struct SuggestionEngine: Sendable {
         profile: ErgonomicProfile,
         words: [WordStat],
         existingChords: [ChordEntry],
-        bannedWords: Set<String>,
+        availableChords: [ChordEntry] = [],
         bannedInputs: Set<String>,
         limit: Int = 50
     ) -> [Suggestion] {
-        let existingOutputs = Set(existingChords.map { $0.output.lowercased() })
+        let allAvailableChords = (existingChords + availableChords).reduce(into: [UUID: ChordEntry]()) {
+            $0[$1.id] = $1
+        }.map(\.value)
+        let chordsByOutput = Dictionary(grouping: allAvailableChords) {
+            ($0.plainOutput ?? $0.output).lowercased()
+        }
         let existingInputs = Set(existingChords.map(\.normalizedInput))
         let existingInputIdentities = Self.inputIdentities(for: existingChords)
         let definition = profileDefinition(for: profile)
@@ -246,8 +256,34 @@ public struct SuggestionEngine: Sendable {
             .reduce(into: [Suggestion]()) { result, stat in
                 let normalizedWord = stat.word.lowercased()
                 guard normalizedWord.count >= 3 else { return }
-                guard !bannedWords.contains(normalizedWord) else { return }
-                guard !existingOutputs.contains(normalizedWord) else { return }
+                if let existingChord = chordsByOutput[normalizedWord]?.sorted(by: { lhs, rhs in
+                    if (lhs.profile == profile) != (rhs.profile == profile) {
+                        return lhs.profile == profile
+                    }
+                    return lhs.updatedAt > rhs.updatedAt
+                }).first {
+                    let inputKeys = existingChord.displayInput.isEmpty
+                        ? existingChord.inputKeys
+                        : existingChord.displayInput
+                    let priorityScore = Double(stat.frequency) * max(Double(normalizedWord.count - 2), 1) * max(stat.avgMs, 100)
+                    result.append(
+                        Suggestion(
+                            word: normalizedWord,
+                            profile: profile,
+                            candidates: [
+                                Candidate(
+                                    inputKeys: inputKeys,
+                                    score: 0,
+                                    hardFailures: [],
+                                    softReasons: ["Already available on \(existingChord.profile.displayName)."]
+                                )
+                            ],
+                            priorityScore: priorityScore,
+                            acceptedChordId: existingChord.id
+                        )
+                    )
+                    return
+                }
 
                 let candidates = buildCandidates(
                     for: normalizedWord,
@@ -299,6 +335,8 @@ public struct SuggestionEngine: Sendable {
         var candidateInputs: Set<[String]> = []
         var candidateHints: [[String]: CandidateHint] = [:]
         var longFallbackInputs: Set<[String]> = []
+        var conflictFallbackInputs: Set<[String]> = []
+        var symbolNamespaceInputs: Set<[String]> = []
         let starredStyleModel = StarredStyleModel(existingChords: existingChords, definition: definition)
 
         func insertCandidate(_ keys: [String], hint: CandidateHint? = nil) {
@@ -366,6 +404,8 @@ public struct SuggestionEngine: Sendable {
                     existingInputIdentities: existingInputIdentities,
                     bannedInputs: bannedInputs,
                     isLongFallback: longFallbackInputs.contains($0),
+                    isConflictFallback: conflictFallbackInputs.contains($0),
+                    usesSymbolNamespace: symbolNamespaceInputs.contains($0),
                     starredStyleModel: starredStyleModel
                 )
             }
@@ -382,6 +422,20 @@ public struct SuggestionEngine: Sendable {
             for candidate in smartLongFallbackCandidates(anchorAnalysis: anchorAnalysis, priorityLetters: priorityLetters, definition: definition) {
                 insertCandidate(candidate)
                 longFallbackInputs.insert(candidate)
+            }
+            scored = scoredCandidates()
+        }
+
+        if scored.allSatisfy({ !$0.hardFailures.isEmpty }) {
+            for fallback in conflictRelaxedFallbackCandidates(
+                priorityLetters: priorityLetters,
+                definition: definition
+            ) {
+                insertCandidate(fallback.inputKeys)
+                conflictFallbackInputs.insert(fallback.inputKeys)
+                if fallback.usesSymbolNamespace {
+                    symbolNamespaceInputs.insert(fallback.inputKeys)
+                }
             }
             scored = scoredCandidates()
         }
@@ -475,6 +529,8 @@ public struct SuggestionEngine: Sendable {
         existingInputIdentities: Set<String>,
         bannedInputs: Set<String>,
         isLongFallback: Bool,
+        isConflictFallback: Bool,
+        usesSymbolNamespace: Bool,
         starredStyleModel: StarredStyleModel
     ) -> Candidate {
         let normalizedKeys = inputKeys.map { $0.lowercased() }
@@ -580,6 +636,17 @@ public struct SuggestionEngine: Sendable {
         if isLongFallback {
             score += 10
             softReasons.append("Long ergonomic fallback.")
+        }
+
+        if isConflictFallback {
+            score += 8
+            score -= Double(max(normalizedKeys.count - 2, 0)) * 12
+            softReasons.append("Conflict-free mnemonic fallback.")
+        }
+
+        if usesSymbolNamespace {
+            score += 8
+            softReasons.append("Uses a short-word symbol namespace from the existing M4G library style.")
         }
 
         let starredStyle = starredStyleModel.score(for: normalizedKeys, anchorCoverage: anchorCoverage, definition: definition)
@@ -716,6 +783,86 @@ public struct SuggestionEngine: Sendable {
         return Array(candidates)
     }
 
+    private func conflictRelaxedFallbackCandidates(
+        priorityLetters: [String],
+        definition: ProfileDefinition
+    ) -> [ConflictFallbackCandidate] {
+        let availableTokens = Set(definition.placements.keys)
+        let anchors = orderedUnique(priorityLetters)
+            .filter(availableTokens.contains)
+        guard !anchors.isEmpty else { return [] }
+
+        func isPhysicallyValid(_ tokens: [String]) -> Bool {
+            guard tokens.count >= 2,
+                  Set(tokens).count == tokens.count,
+                  tokens.allSatisfy(availableTokens.contains) else {
+                return false
+            }
+            if let physicalModel = definition.m4gPhysicalModel {
+                return ActionCodec.chordActions(forTokens: tokens) != nil
+                    && physicalModel.hardConflictReasons(for: tokens).isEmpty
+            }
+            return true
+        }
+
+        let anchorPool = Array(anchors.prefix(6))
+        var compatibleAnchorSets: [[String]] = []
+        for count in stride(from: min(3, anchorPool.count), through: 1, by: -1) {
+            let compatible = combinations(of: anchorPool, taking: count).filter { anchors in
+                if let physicalModel = definition.m4gPhysicalModel {
+                    return anchors.allSatisfy(availableTokens.contains)
+                        && physicalModel.hardConflictReasons(for: anchors).isEmpty
+                }
+                return anchors.allSatisfy(availableTokens.contains)
+            }
+            if !compatible.isEmpty {
+                compatibleAnchorSets = compatible
+                break
+            }
+        }
+        guard !compatibleAnchorSets.isEmpty else { return [] }
+
+        let namespaceTokens = Self.shortWordNamespaceTokens.filter(availableTokens.contains)
+        let anchorTokenSet = Set(anchors)
+        let ergonomicTokens = Self.ergonomicFallbackTokens.filter { token in
+            availableTokens.contains(token) && !anchorTokenSet.contains(token)
+        }
+        var seen: Set<[String]> = []
+        var results: [ConflictFallbackCandidate] = []
+
+        func append(_ inputKeys: [String], usesSymbolNamespace: Bool) {
+            guard isPhysicallyValid(inputKeys), seen.insert(inputKeys).inserted else { return }
+            results.append(
+                ConflictFallbackCandidate(
+                    inputKeys: inputKeys,
+                    usesSymbolNamespace: usesSymbolNamespace
+                )
+            )
+        }
+
+        for anchors in compatibleAnchorSets.prefix(12) {
+            for namespace in namespaceTokens {
+                append([namespace] + anchors, usesSymbolNamespace: true)
+            }
+            for token in ergonomicTokens.prefix(14) {
+                append(anchors + [token], usesSymbolNamespace: false)
+            }
+
+            // Keep enough three-key alternatives to survive occupied or banned
+            // two-key inputs without reintroducing mutually exclusive anchors.
+            for namespace in namespaceTokens.prefix(3) {
+                for token in ergonomicTokens.prefix(8) {
+                    append([namespace] + anchors + [token], usesSymbolNamespace: true)
+                }
+            }
+            for pair in combinations(of: Array(ergonomicTokens.prefix(10)), taking: 2) {
+                append(anchors + pair, usesSymbolNamespace: false)
+            }
+        }
+
+        return results
+    }
+
     private func orderedUnique(_ tokens: [String]) -> [String] {
         tokens.reduce(into: [String]()) { result, token in
             let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -744,6 +891,8 @@ public struct SuggestionEngine: Sendable {
     private static let ergonomicFallbackTokens = [
         "i", "e", "o", "n", "l", "d", "h", "f", "p", "c", "u", "y", "w", "g", "k", "b", "j", "q", "x", "z"
     ]
+
+    private static let shortWordNamespaceTokens = [".", "'", "`", ",", ";", "/"]
 
     private func profileDefinition(for profile: ErgonomicProfile) -> ProfileDefinition {
         switch profile {

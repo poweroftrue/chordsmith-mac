@@ -185,16 +185,10 @@ public final class ChordEngine: ObservableObject {
                 injector.injectText(chord.output)
             }
             Task {
-                await recorder.recordChordOutput(chord.output, startedAt: session.startedAt, endedAt: endedAt)
+                await recorder.recordSoftwareChord(chord, startedAt: session.startedAt, endedAt: endedAt)
             }
         } else {
             injector.replay(events: session.events)
-            let literalText = session.tokens.compactMap { KeyMap.character(for: $0) }.joined()
-            if !literalText.isEmpty {
-                Task {
-                    await recorder.recordLiteralText(literalText, startedAt: session.startedAt, endedAt: endedAt)
-                }
-            }
         }
     }
 

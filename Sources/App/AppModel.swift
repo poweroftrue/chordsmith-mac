@@ -11,6 +11,7 @@ enum PanelTab: String, CaseIterable, Identifiable {
     case add
     case staged
     case suggestions
+    case usage
 
     var id: String { rawValue }
 }
@@ -93,15 +94,39 @@ final class AppModel: ObservableObject {
     @Published var bootstrapProgress: (current: Int, total: Int)?
     @Published var lastError: String?
     @Published var engineEnabled = true
+    @Published var inputObservationEnabled = true
     @Published var activeSoftwareProfile: ErgonomicProfile = .ansiQwerty
     @Published var excludedBundleIDsText = ""
     @Published var suggestionProfile: ErgonomicProfile = .ansiQwerty
+    @Published private(set) var launchAtLoginEnabled = false
+    @Published private(set) var launchAtLoginNeedsApproval = false
+    @Published private(set) var canManageLaunchAtLogin = false
+    @Published private(set) var launchAtLoginStatusText = "Checking launch-at-login status…"
+    @Published var usageOverview = UsageOverview(
+        wordsToday: 0,
+        chordsToday: 0,
+        words7Days: 0,
+        chords7Days: 0,
+        words30Days: 0,
+        chords30Days: 0,
+        wordsAllTime: 0,
+        chordsAllTime: 0
+    )
+    @Published var recentWordUsage: [DailyWordUsage] = []
+    @Published var recentChordUsage: [DailyChordUsage] = []
+    @Published var twoKeyChordImpact: [TwoKeyChordImpact] = []
+    @Published var wordCoverageReport = WordCoverageReport.empty
+    @Published var usageLanguageFilter: WordLanguage? = nil
+    @Published var usageCoverageDays: Int? = 30
 
     let libraryService: LibraryService
     let deviceService: any AppDeviceService
     let recorder: TypingRecorder
     let engine: ChordEngine
+    let inputObserver: InputObservationEngine
+    private let launchAtLoginController: LaunchAtLoginController
     private static let pendingDeviceMutationsSettingKey = "device.pending_mutations.v1"
+    private static let launchAtLoginAttemptedSettingKey = "startup.launch_at_login_attempted.v1"
 
     convenience init() throws {
         let libraryService = try LibraryService()
@@ -113,17 +138,34 @@ final class AppModel: ObservableObject {
         self.deviceService = deviceService
         self.recorder = TypingRecorder(libraryService: libraryService)
         self.engine = ChordEngine(recorder: recorder)
+        self.inputObserver = InputObservationEngine(recorder: recorder)
+        self.launchAtLoginController = LaunchAtLoginController()
     }
 
     func start() {
         Task {
             await loadSettings()
+            await configureLaunchAtLogin()
             await loadPendingDeviceMutations()
             await bootstrapIfNeeded()
+            do {
+                _ = try await libraryService.migrateLegacyTimingInferencesIfNeeded()
+            } catch {
+                lastError = error.localizedDescription
+                statusText = "Could not clean legacy usage data"
+            }
             await refresh()
             engine.start()
+            if inputObservationEnabled {
+                inputObserver.start()
+            }
             statusText = "Ready"
         }
+    }
+
+    func stop() {
+        engine.stop()
+        inputObserver.stop()
     }
 
     func refresh() async {
@@ -131,7 +173,9 @@ final class AppModel: ObservableObject {
             chords = try await libraryService.allChords()
             suggestions = try await libraryService.listSuggestions(profile: suggestionProfile)
             let activeChords = try await libraryService.activeChords(for: activeSoftwareProfile)
+            let deviceChords = try await libraryService.deviceChords()
             engine.updateChords(activeChords)
+            await recorder.updateDeviceChords(deviceChords)
             engine.updateConfiguration(
                 EngineConfiguration(
                     enabled: engineEnabled,
@@ -140,6 +184,7 @@ final class AppModel: ObservableObject {
                 )
             )
             deviceSource = try await libraryService.sources().first(where: { $0.isPrimary })
+            await loadUsageReport()
         } catch {
             lastError = error.localizedDescription
         }
@@ -194,6 +239,75 @@ final class AppModel: ObservableObject {
             lastError = error.localizedDescription
             statusText = "Suggestion rebuild failed"
         }
+    }
+
+    func loadUsageReport() async {
+        do {
+            usageOverview = try await libraryService.usageOverview()
+            recentWordUsage = try await libraryService.dailyWordUsage(days: 30, limit: 50)
+            recentChordUsage = try await libraryService.dailyChordUsage(days: 30, limit: 50)
+            twoKeyChordImpact = try await libraryService.twoKeyChordImpactReport(limit: 100)
+            wordCoverageReport = try await libraryService.wordCoverageReport(
+                days: usageCoverageDays,
+                language: usageLanguageFilter,
+                limitPerGroup: 100
+            )
+        } catch {
+            lastError = error.localizedDescription
+            statusText = "Usage report failed"
+        }
+    }
+
+    func toggleInputObservation() {
+        if inputObserver.isRunning {
+            inputObservationEnabled = false
+            inputObserver.stop()
+            statusText = "Usage recorder paused"
+        } else {
+            inputObservationEnabled = true
+            inputObserver.start()
+            statusText = inputObserver.isRunning ? "Usage recorder running" : "Usage recorder could not start"
+        }
+    }
+
+    func resumeInputObservationIfNeeded() {
+        guard inputObservationEnabled, !inputObserver.isRunning else { return }
+        inputObserver.start()
+    }
+
+    func openInputMonitoringSettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+        ) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func setLaunchAtLoginEnabled(_ enabled: Bool) {
+        applyLaunchAtLoginState(launchAtLoginController.setEnabled(enabled))
+        Task {
+            try? await libraryService.setSetting(
+                Self.launchAtLoginAttemptedSettingKey,
+                value: "1"
+            )
+        }
+    }
+
+    func refreshLaunchAtLoginStatus() {
+        applyLaunchAtLoginState(launchAtLoginController.currentState())
+    }
+
+    func openLoginItemSettings() {
+        launchAtLoginController.openLoginItemSettings()
+    }
+
+    func setUsageLanguageFilter(_ language: WordLanguage?) {
+        usageLanguageFilter = language
+        Task { await loadUsageReport() }
+    }
+
+    func setUsageCoverageDays(_ days: Int?) {
+        usageCoverageDays = days
+        Task { await loadUsageReport() }
     }
 
     func addChord(input: String, output: String, profile: ErgonomicProfile, deploymentTarget: DeploymentTarget, enabled: Bool = true, source: String = "user") async {
@@ -477,19 +591,6 @@ final class AppModel: ObservableObject {
         statusText = "Staged delete \(chord.normalizedInput)"
     }
 
-    func toggleChord(_ chord: ChordEntry) async {
-        await setChordEnabled(chord, enabled: !chord.enabled)
-    }
-
-    func setChordEnabled(_ chord: ChordEntry, enabled: Bool) async {
-        do {
-            try await libraryService.setChordEnabled(id: chord.id, enabled: enabled)
-            await refresh()
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
     func toggleChordStarred(_ chord: ChordEntry) async {
         await setChordStarred(chord, starred: !chord.isStarred)
     }
@@ -522,9 +623,8 @@ final class AppModel: ObservableObject {
     }
 
     func adviseChord(for word: String) async {
-        let normalizedWord = word
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
+        let requestedOutput = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedWord = requestedOutput.lowercased()
         guard !normalizedWord.isEmpty else {
             advisorExistingChords = []
             advisorCandidates = []
@@ -536,13 +636,13 @@ final class AppModel: ObservableObject {
         do {
             let existingChords = try await libraryService.deviceChords(forOutput: normalizedWord)
             let candidates = try await libraryService.adviseChord(
-                for: normalizedWord,
+                for: requestedOutput,
                 profile: .cc2A1,
                 allowExistingOutput: true,
                 limit: 10
             )
             let rejected = try await libraryService.diagnoseRejectedChordCandidates(
-                for: normalizedWord,
+                for: requestedOutput,
                 profile: .cc2A1,
                 allowExistingOutput: true,
                 limit: 8
@@ -553,14 +653,14 @@ final class AppModel: ObservableObject {
             if !existingChords.isEmpty {
                 let noun = existingChords.count == 1 ? "chord" : "chords"
                 if candidates.isEmpty {
-                    statusText = "\(normalizedWord) already has \(existingChords.count) M4G \(noun); no additional suggestions"
+                    statusText = "\(requestedOutput) already has \(existingChords.count) M4G \(noun); no additional suggestions"
                 } else {
                     let suggestionNoun = candidates.count == 1 ? "suggestion" : "suggestions"
-                    statusText = "\(normalizedWord) already has \(existingChords.count) M4G \(noun); found \(candidates.count) more \(suggestionNoun)"
+                    statusText = "\(requestedOutput) already has \(existingChords.count) M4G \(noun); found \(candidates.count) more \(suggestionNoun)"
                 }
             } else {
                 statusText = candidates.isEmpty
-                    ? "No conflict-free candidate found for \(normalizedWord)"
+                    ? "No conflict-free candidate found for \(requestedOutput)"
                     : "Advisor found \(candidates.count) candidates"
             }
         } catch {
@@ -584,9 +684,10 @@ final class AppModel: ObservableObject {
     }
 
     func acceptAdvisorCandidate(_ candidate: Candidate, word: String) async {
+        let output = word.trimmingCharacters(in: .whitespacesAndNewlines)
         await addChord(
             input: candidate.inputKeys.joined(separator: ","),
-            output: word.lowercased(),
+            output: output,
             profile: .cc2A1,
             deploymentTarget: .device,
             enabled: true,
@@ -704,6 +805,36 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func configureLaunchAtLogin() async {
+        canManageLaunchAtLogin = launchAtLoginController.isInstalledApplication
+        guard canManageLaunchAtLogin else {
+            applyLaunchAtLoginState(.unavailable)
+            return
+        }
+
+        let attempted = try? await libraryService.stringSetting(
+            forKey: Self.launchAtLoginAttemptedSettingKey
+        )
+        if attempted == nil || launchAtLoginController.serviceWasNotFound {
+            applyLaunchAtLoginState(launchAtLoginController.setEnabled(true))
+            try? await libraryService.setSetting(
+                Self.launchAtLoginAttemptedSettingKey,
+                value: "1"
+            )
+        } else {
+            applyLaunchAtLoginState(launchAtLoginController.currentState())
+        }
+    }
+
+    private func applyLaunchAtLoginState(_ state: LaunchAtLoginState) {
+        launchAtLoginEnabled = state.isEnabled
+        launchAtLoginNeedsApproval = state.needsApproval
+        launchAtLoginStatusText = state.description
+        if case .error(let message) = state {
+            lastError = message
+        }
+    }
+
     private func loadPendingDeviceMutations() async {
         do {
             guard let value = try await libraryService.stringSetting(forKey: Self.pendingDeviceMutationsSettingKey),
@@ -728,7 +859,7 @@ final class AppModel: ObservableObject {
         guard !pendingMutations.isEmpty else { return }
         guard let portPath else {
             throw NSError(
-                domain: "Charaworder.DeviceSync",
+                domain: "Chordsmith.DeviceSync",
                 code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "No primary device source is loaded."]
             )

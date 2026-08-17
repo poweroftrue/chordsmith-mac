@@ -182,13 +182,22 @@ public struct WordStat: Codable, Hashable, Sendable {
     public let avgMs: Double
     public let lastUsedAt: Date
     public let source: String
+    public let language: WordLanguage
 
-    public init(word: String, frequency: Int, avgMs: Double, lastUsedAt: Date, source: String) {
+    public init(
+        word: String,
+        frequency: Int,
+        avgMs: Double,
+        lastUsedAt: Date,
+        source: String,
+        language: WordLanguage = .other
+    ) {
         self.word = word
         self.frequency = frequency
         self.avgMs = avgMs
         self.lastUsedAt = lastUsedAt
         self.source = source
+        self.language = language
     }
 }
 
@@ -203,6 +212,252 @@ public struct ChordStat: Codable, Hashable, Sendable {
         self.frequency = frequency
         self.lastUsedAt = lastUsedAt
         self.source = source
+    }
+}
+
+public enum UsageSource: String, Codable, CaseIterable, Sendable, Identifiable {
+    case keyboard
+    case m4gTyping = "m4g_typing"
+    case m4gHIDConfirmed = "m4g_hid_confirmed"
+    case softwareChord = "software_chord"
+    case nexusImport = "nexus_import"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .keyboard:
+            return "Keyboard"
+        case .m4gTyping:
+            return "M4G typing"
+        case .m4gHIDConfirmed:
+            return "M4G confirmed"
+        case .softwareChord:
+            return "Software chord"
+        case .nexusImport:
+            return "Nexus import"
+        }
+    }
+}
+
+public enum ChordUsageConfidence: String, Codable, CaseIterable, Sendable, Identifiable {
+    case exactSoftware = "exact_software"
+    case confirmedHardware = "confirmed_hardware"
+    case ambiguousOutput = "ambiguous_output"
+    case nexusImport = "nexus_import"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .exactSoftware:
+            return "Exact software"
+        case .confirmedHardware:
+            return "Confirmed hardware"
+        case .ambiguousOutput:
+            return "Ambiguous output"
+        case .nexusImport:
+            return "Nexus import"
+        }
+    }
+}
+
+public struct DailyWordUsage: Codable, Hashable, Sendable, Identifiable {
+    public var id: String { "\(day):\(source.rawValue):\(word)" }
+
+    public let day: String
+    public let word: String
+    public let source: UsageSource
+    public let frequency: Int
+    public let avgMs: Double
+    public let lastUsedAt: Date
+    public let language: WordLanguage
+
+    public init(
+        day: String,
+        word: String,
+        source: UsageSource,
+        frequency: Int,
+        avgMs: Double,
+        lastUsedAt: Date,
+        language: WordLanguage = .other
+    ) {
+        self.day = day
+        self.word = word
+        self.source = source
+        self.frequency = frequency
+        self.avgMs = avgMs
+        self.lastUsedAt = lastUsedAt
+        self.language = language
+    }
+}
+
+public struct WordCoverageStat: Codable, Hashable, Sendable, Identifiable {
+    public var id: String { word }
+
+    public let word: String
+    public let language: WordLanguage
+    public let frequency: Int
+    public let avgMs: Double
+    public let lastUsedAt: Date
+    public let matchingChords: [ChordEntry]
+
+    public var isCovered: Bool { !matchingChords.isEmpty }
+
+    public init(
+        word: String,
+        language: WordLanguage,
+        frequency: Int,
+        avgMs: Double,
+        lastUsedAt: Date,
+        matchingChords: [ChordEntry]
+    ) {
+        self.word = word
+        self.language = language
+        self.frequency = frequency
+        self.avgMs = avgMs
+        self.lastUsedAt = lastUsedAt
+        self.matchingChords = matchingChords
+    }
+}
+
+public struct WordCoverageReport: Codable, Hashable, Sendable {
+    public let totalOccurrences: Int
+    public let coveredOccurrences: Int
+    public let uniqueWords: Int
+    public let coveredUniqueWords: Int
+    public let coveredWords: [WordCoverageStat]
+    public let uncoveredWords: [WordCoverageStat]
+
+    public var uncoveredOccurrences: Int { max(0, totalOccurrences - coveredOccurrences) }
+    public var uncoveredUniqueWords: Int { max(0, uniqueWords - coveredUniqueWords) }
+    public var coverageRate: Double {
+        guard totalOccurrences > 0 else { return 0 }
+        return Double(coveredOccurrences) / Double(totalOccurrences)
+    }
+
+    public init(
+        totalOccurrences: Int,
+        coveredOccurrences: Int,
+        uniqueWords: Int,
+        coveredUniqueWords: Int,
+        coveredWords: [WordCoverageStat],
+        uncoveredWords: [WordCoverageStat]
+    ) {
+        self.totalOccurrences = totalOccurrences
+        self.coveredOccurrences = coveredOccurrences
+        self.uniqueWords = uniqueWords
+        self.coveredUniqueWords = coveredUniqueWords
+        self.coveredWords = coveredWords
+        self.uncoveredWords = uncoveredWords
+    }
+
+    public static let empty = WordCoverageReport(
+        totalOccurrences: 0,
+        coveredOccurrences: 0,
+        uniqueWords: 0,
+        coveredUniqueWords: 0,
+        coveredWords: [],
+        uncoveredWords: []
+    )
+}
+
+public struct DailyChordUsage: Codable, Hashable, Sendable, Identifiable {
+    public var id: String {
+        "\(day):\(source.rawValue):\(matchedChordId?.uuidString ?? "none"):\(output)"
+    }
+
+    public let day: String
+    public let output: String
+    public let matchedChordId: UUID?
+    public let source: UsageSource
+    public let frequency: Int
+    public let avgMs: Double
+    public let confidence: ChordUsageConfidence
+    public let ambiguityCount: Int
+    public let lastUsedAt: Date
+
+    public init(
+        day: String,
+        output: String,
+        matchedChordId: UUID?,
+        source: UsageSource,
+        frequency: Int,
+        avgMs: Double,
+        confidence: ChordUsageConfidence,
+        ambiguityCount: Int,
+        lastUsedAt: Date
+    ) {
+        self.day = day
+        self.output = output
+        self.matchedChordId = matchedChordId
+        self.source = source
+        self.frequency = frequency
+        self.avgMs = avgMs
+        self.confidence = confidence
+        self.ambiguityCount = ambiguityCount
+        self.lastUsedAt = lastUsedAt
+    }
+}
+
+public struct UsageOverview: Codable, Hashable, Sendable {
+    public let wordsToday: Int
+    public let chordsToday: Int
+    public let words7Days: Int
+    public let chords7Days: Int
+    public let words30Days: Int
+    public let chords30Days: Int
+    public let wordsAllTime: Int
+    public let chordsAllTime: Int
+
+    public init(
+        wordsToday: Int,
+        chordsToday: Int,
+        words7Days: Int,
+        chords7Days: Int,
+        words30Days: Int,
+        chords30Days: Int,
+        wordsAllTime: Int,
+        chordsAllTime: Int
+    ) {
+        self.wordsToday = wordsToday
+        self.chordsToday = chordsToday
+        self.words7Days = words7Days
+        self.chords7Days = chords7Days
+        self.words30Days = words30Days
+        self.chords30Days = chords30Days
+        self.wordsAllTime = wordsAllTime
+        self.chordsAllTime = chordsAllTime
+    }
+}
+
+public struct TwoKeyChordImpact: Codable, Hashable, Sendable, Identifiable {
+    public var id: UUID { chord.id }
+
+    public let chord: ChordEntry
+    public let totalFrequency: Int
+    public let frequency7Days: Int
+    public let frequency30Days: Int
+    public let lastUsedAt: Date?
+    public let confidence: ChordUsageConfidence?
+    public let ambiguityCount: Int
+
+    public init(
+        chord: ChordEntry,
+        totalFrequency: Int,
+        frequency7Days: Int,
+        frequency30Days: Int,
+        lastUsedAt: Date?,
+        confidence: ChordUsageConfidence?,
+        ambiguityCount: Int
+    ) {
+        self.chord = chord
+        self.totalFrequency = totalFrequency
+        self.frequency7Days = frequency7Days
+        self.frequency30Days = frequency30Days
+        self.lastUsedAt = lastUsedAt
+        self.confidence = confidence
+        self.ambiguityCount = ambiguityCount
     }
 }
 
@@ -342,10 +597,10 @@ public enum AppSupportPaths {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Application Support", isDirectory: true)
-            .appendingPathComponent("Charaworder", isDirectory: true)
+            .appendingPathComponent("Chordsmith", isDirectory: true)
     }
 
     public static var databaseURL: URL {
-        baseURL.appendingPathComponent("charaworder.sqlite3")
+        baseURL.appendingPathComponent("chordsmith.sqlite3")
     }
 }

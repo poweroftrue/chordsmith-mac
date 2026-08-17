@@ -60,7 +60,7 @@ The normal workflow is:
 
 Commit applies the local database change and writes only that staged device mutation to the M4G. It does not run a full device reconciliation as part of the normal flow. If the device write fails, the local change stays committed and the failed device mutation is queued for retry.
 
-## Run Locally
+## Install And Start At Login
 
 Requirements:
 
@@ -68,11 +68,24 @@ Requirements:
 - Xcode command line tools or Xcode
 - Swift 6.2 toolchain
 
-Run from the repository root:
+Build a signed local app bundle, install it in `~/Applications`, and launch it:
 
 ```sh
-swift run Charaworder
+./scripts/install_app.sh
 ```
+
+On its first bundled launch, Chordsmith registers the main app with macOS 13+
+Service Management. It then runs as an efficient menu-bar app at each login.
+You can disable it or open macOS Login Items from Chordsmith Settings.
+
+On first launch, grant **Input Monitoring** when macOS asks. If it is not yet
+enabled, open Chordsmith's **Usage** tab and choose **Input Monitoring…**, then
+enable Chordsmith in **System Settings › Privacy & Security › Input Monitoring**.
+The recorder retries automatically when you return to Chordsmith. It remains
+paused—and saves no words—until this permission is granted.
+
+For a one-off development run, `swift run Chordsmith` still works, but launch at
+login is intentionally unavailable outside an installed `.app` bundle.
 
 Run tests:
 
@@ -83,6 +96,10 @@ swift test
 ## Data And Privacy
 
 Chordsmith Mac stores local app data under macOS Application Support. The advisor runs locally and does not require an AI service or network access for chord generation.
+
+The usage recorder requires macOS Input Monitoring permission. A Master Forge is one logical device made from separately enumerated left (`m4g_s3`) and right (`m4gr_s3`) digitizer halves. Chordsmith recognizes both halves by their USB HID descriptor and correlates each half's key-down with the corresponding macOS keyboard event. Unmatched events are recorded as normal keyboard input; if physical attribution is unavailable, the recorder does not save the word. The Usage tab shows whether one or both Master Forge halves are available for physical attribution.
+
+Word detection uses Apple's on-device Natural Language tokenizer and Unicode normalization for English and Arabic. Arabic tashkeel and tatweel are removed from aggregate keys so visually equivalent spellings count together. Only normalized word-level frequency, timing, language, and source aggregates are stored; raw keystrokes, sentences, and application names are not persisted. SQLite runs in WAL mode with normal synchronization to minimize write overhead for an always-on recorder.
 
 ## License
 

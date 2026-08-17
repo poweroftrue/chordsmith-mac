@@ -3,13 +3,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "Charaworder",
+    name: "Chordsmith",
     platforms: [
         .macOS(.v13)
     ],
     products: [
         .executable(
-            name: "Charaworder",
+            name: "Chordsmith",
             targets: ["App"]
         )
     ],
@@ -23,7 +23,8 @@ let package = Package(
                 .process("Resources")
             ],
             linkerSettings: [
-                .linkedLibrary("sqlite3")
+                .linkedLibrary("sqlite3"),
+                .linkedFramework("NaturalLanguage")
             ]
         ),
         .target(
@@ -32,7 +33,10 @@ let package = Package(
         ),
         .target(
             name: "Engine",
-            dependencies: ["Library"]
+            dependencies: ["Library"],
+            linkerSettings: [
+                .linkedFramework("IOKit")
+            ]
         ),
         .executableTarget(
             name: "App",
@@ -41,6 +45,9 @@ let package = Package(
                 "Device",
                 "Engine",
                 "KeyboardShortcuts"
+            ],
+            linkerSettings: [
+                .linkedFramework("ServiceManagement")
             ]
         ),
         .testTarget(

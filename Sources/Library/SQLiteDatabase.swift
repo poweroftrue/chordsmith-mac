@@ -61,7 +61,14 @@ final class SQLiteDatabase {
         }
 
         handle = db
+        sqlite3_busy_timeout(handle, 5_000)
         try execute("PRAGMA foreign_keys = ON")
+        // WAL plus NORMAL durability avoids a full fsync for every completed
+        // word while retaining crash-safe committed transactions.
+        try execute("PRAGMA journal_mode = WAL")
+        try execute("PRAGMA synchronous = NORMAL")
+        try execute("PRAGMA temp_store = MEMORY")
+        try execute("PRAGMA cache_size = -8192")
         try migrate()
     }
 
@@ -197,10 +204,12 @@ final class SQLiteDatabase {
                 avg_ms REAL NOT NULL,
                 last_used_at REAL NOT NULL,
                 source TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT 'other',
                 PRIMARY KEY (word, source)
             )
             """
         )
+        try addColumnIfMissing(table: "word_stats", name: "language", definition: "TEXT NOT NULL DEFAULT 'other'")
         try execute(
             """
             CREATE TABLE IF NOT EXISTS chord_feedback (
@@ -226,6 +235,43 @@ final class SQLiteDatabase {
         )
         try execute(
             """
+            CREATE TABLE IF NOT EXISTS daily_word_stats (
+                day TEXT NOT NULL,
+                word TEXT NOT NULL,
+                source TEXT NOT NULL,
+                frequency INTEGER NOT NULL,
+                avg_ms REAL NOT NULL,
+                last_used_at REAL NOT NULL,
+                language TEXT NOT NULL DEFAULT 'other',
+                PRIMARY KEY (day, word, source)
+            )
+            """
+        )
+        try addColumnIfMissing(table: "daily_word_stats", name: "language", definition: "TEXT NOT NULL DEFAULT 'other'")
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_chord_stats (
+                day TEXT NOT NULL,
+                output TEXT NOT NULL,
+                matched_chord_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                frequency INTEGER NOT NULL,
+                avg_ms REAL NOT NULL,
+                confidence TEXT NOT NULL,
+                ambiguity_count INTEGER NOT NULL,
+                last_used_at REAL NOT NULL,
+                PRIMARY KEY (day, output, matched_chord_id, source, confidence)
+            )
+            """
+        )
+        try execute("CREATE INDEX IF NOT EXISTS daily_word_stats_word ON daily_word_stats(word)")
+        try execute("CREATE INDEX IF NOT EXISTS daily_word_stats_language ON daily_word_stats(language)")
+        try execute("CREATE INDEX IF NOT EXISTS daily_word_stats_last_used ON daily_word_stats(last_used_at)")
+        try execute("CREATE INDEX IF NOT EXISTS daily_chord_stats_output ON daily_chord_stats(output)")
+        try execute("CREATE INDEX IF NOT EXISTS daily_chord_stats_chord ON daily_chord_stats(matched_chord_id)")
+        try execute("CREATE INDEX IF NOT EXISTS daily_chord_stats_last_used ON daily_chord_stats(last_used_at)")
+        try execute(
+            """
             CREATE TABLE IF NOT EXISTS suggestions (
                 word TEXT NOT NULL,
                 profile TEXT NOT NULL,
@@ -248,6 +294,9 @@ final class SQLiteDatabase {
             )
             """
         )
+        // Word-level suggestion bans were never exposed in the UI and are no longer
+        // part of suggestion generation. Keep this table only for banned chord inputs.
+        try execute("DELETE FROM bans WHERE kind = 'word'")
         try execute(
             """
             CREATE TABLE IF NOT EXISTS sources (
@@ -268,6 +317,133 @@ final class SQLiteDatabase {
             )
             """
         )
+        try migrateMultilingualWordsIfNeeded()
+    }
+
+    private struct WordAggregateKey: Hashable {
+        let word: String
+        let source: String
+    }
+
+    private struct DailyWordAggregateKey: Hashable {
+        let day: String
+        let word: String
+        let source: String
+    }
+
+    private struct WordAggregate {
+        var frequency: Int
+        var weightedMilliseconds: Double
+        var lastUsedAt: Double
+        let language: WordLanguage
+
+        var averageMilliseconds: Double {
+            weightedMilliseconds / Double(max(frequency, 1))
+        }
+    }
+
+    /// Rewrites legacy word keys exactly once so Arabic tashkeel/tatweel and
+    /// Unicode case variants do not fragment frequency statistics. Compounds
+    /// that Natural Language recognizes as multiple words are split while
+    /// retaining their original aggregate frequency.
+    private func migrateMultilingualWordsIfNeeded() throws {
+        let migrationKey = "usage.multilingual_words.v1"
+        let completed = try query(
+            "SELECT value FROM settings WHERE key = ?",
+            bindings: [.text(migrationKey)]
+        ).first?.string("value") == "complete"
+        guard !completed else { return }
+
+        let allTimeRows = try query(
+            "SELECT word, source, frequency, avg_ms, last_used_at FROM word_stats"
+        )
+        let dailyRows = try query(
+            "SELECT day, word, source, frequency, avg_ms, last_used_at FROM daily_word_stats"
+        )
+
+        var allTime: [WordAggregateKey: WordAggregate] = [:]
+        for row in allTimeRows {
+            guard let rawWord = row.string("word"),
+                  let source = row.string("source"),
+                  let frequencyValue = row.integer("frequency"),
+                  let average = row.double("avg_ms"),
+                  let lastUsedAt = row.double("last_used_at") else { continue }
+            let frequency = Int(frequencyValue)
+            for processed in MultilingualWordProcessor.words(in: rawWord) {
+                let key = WordAggregateKey(word: processed.text, source: source)
+                var value = allTime[key] ?? WordAggregate(
+                    frequency: 0,
+                    weightedMilliseconds: 0,
+                    lastUsedAt: lastUsedAt,
+                    language: processed.language
+                )
+                value.frequency += frequency
+                value.weightedMilliseconds += average * Double(frequency)
+                value.lastUsedAt = max(value.lastUsedAt, lastUsedAt)
+                allTime[key] = value
+            }
+        }
+
+        var daily: [DailyWordAggregateKey: WordAggregate] = [:]
+        for row in dailyRows {
+            guard let day = row.string("day"),
+                  let rawWord = row.string("word"),
+                  let source = row.string("source"),
+                  let frequencyValue = row.integer("frequency"),
+                  let average = row.double("avg_ms"),
+                  let lastUsedAt = row.double("last_used_at") else { continue }
+            let frequency = Int(frequencyValue)
+            for processed in MultilingualWordProcessor.words(in: rawWord) {
+                let key = DailyWordAggregateKey(day: day, word: processed.text, source: source)
+                var value = daily[key] ?? WordAggregate(
+                    frequency: 0,
+                    weightedMilliseconds: 0,
+                    lastUsedAt: lastUsedAt,
+                    language: processed.language
+                )
+                value.frequency += frequency
+                value.weightedMilliseconds += average * Double(frequency)
+                value.lastUsedAt = max(value.lastUsedAt, lastUsedAt)
+                daily[key] = value
+            }
+        }
+
+        try transaction {
+            try execute("DELETE FROM word_stats")
+            for (key, value) in allTime {
+                try execute(
+                    "INSERT INTO word_stats (word, frequency, avg_ms, last_used_at, source, language) VALUES (?, ?, ?, ?, ?, ?)",
+                    bindings: [
+                        .text(key.word),
+                        .integer(Int64(value.frequency)),
+                        .double(value.averageMilliseconds),
+                        .double(value.lastUsedAt),
+                        .text(key.source),
+                        .text(value.language.rawValue)
+                    ]
+                )
+            }
+
+            try execute("DELETE FROM daily_word_stats")
+            for (key, value) in daily {
+                try execute(
+                    "INSERT INTO daily_word_stats (day, word, source, frequency, avg_ms, last_used_at, language) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    bindings: [
+                        .text(key.day),
+                        .text(key.word),
+                        .text(key.source),
+                        .integer(Int64(value.frequency)),
+                        .double(value.averageMilliseconds),
+                        .double(value.lastUsedAt),
+                        .text(value.language.rawValue)
+                    ]
+                )
+            }
+            try execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, 'complete')",
+                bindings: [.text(migrationKey)]
+            )
+        }
     }
 
     private func addColumnIfMissing(table: String, name: String, definition: String) throws {

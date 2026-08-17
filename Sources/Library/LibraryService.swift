@@ -12,6 +12,7 @@ public actor LibraryService {
         created_at, updated_at,
         COALESCE((SELECT starred FROM chord_feedback WHERE chord_id = chords.id), 0) AS feedback_starred
         """
+    private static let HIDAttributionMigrationKey = "usage.hid_attribution.v1"
 
     public init(databaseURL: URL = AppSupportPaths.databaseURL, suggestionEngine: SuggestionEngine = SuggestionEngine()) throws {
         self.database = try SQLiteDatabase(url: databaseURL)
@@ -365,69 +366,100 @@ public actor LibraryService {
         return CharaChordExporter.file(from: chords)
     }
 
-    public func upsertWordStat(word: String, avgMs: Double, frequencyDelta: Int = 1, source: String) throws {
-        let normalizedWord = word.lowercased()
-        let rows = try database.query(
-            "SELECT frequency, avg_ms FROM word_stats WHERE word = ? AND source = ?",
-            bindings: [.text(normalizedWord), .text(source)]
+    public func upsertWordStat(
+        word: String,
+        avgMs: Double,
+        frequencyDelta: Int = 1,
+        source: String,
+        lastUsedAt: Date = .now
+    ) throws {
+        guard let processed = MultilingualWordProcessor.normalize(word) else { return }
+        let lastUsed = lastUsedAt.timeIntervalSince1970
+        try database.execute(
+            """
+            INSERT INTO word_stats (word, frequency, avg_ms, last_used_at, source, language)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(word, source) DO UPDATE SET
+                avg_ms = ((word_stats.avg_ms * word_stats.frequency) +
+                          (excluded.avg_ms * excluded.frequency)) /
+                         (word_stats.frequency + excluded.frequency),
+                frequency = word_stats.frequency + excluded.frequency,
+                last_used_at = MAX(word_stats.last_used_at, excluded.last_used_at),
+                language = excluded.language
+            """,
+            bindings: [
+                .text(processed.text),
+                .integer(Int64(frequencyDelta)),
+                .double(avgMs),
+                .double(lastUsed),
+                .text(source),
+                .text(processed.language.rawValue)
+            ]
         )
-        let now = Date().timeIntervalSince1970
+    }
 
-        if let existing = rows.first {
-            let oldFrequency = Int(existing.integer("frequency") ?? 0)
-            let oldAvg = existing.double("avg_ms") ?? avgMs
-            let newFrequency = oldFrequency + frequencyDelta
-            let weightedAvg = ((oldAvg * Double(oldFrequency)) + (avgMs * Double(frequencyDelta))) / Double(max(newFrequency, 1))
-            try database.execute(
-                """
-                UPDATE word_stats
-                SET frequency = ?, avg_ms = ?, last_used_at = ?
-                WHERE word = ? AND source = ?
-                """,
-                bindings: [
-                    .integer(Int64(newFrequency)),
-                    .double(weightedAvg),
-                    .double(now),
-                    .text(normalizedWord),
-                    .text(source)
-                ]
+    public func recordWordUsage(
+        word: String,
+        avgMs: Double,
+        source: UsageSource,
+        frequencyDelta: Int = 1,
+        lastUsedAt: Date = .now
+    ) throws {
+        guard let processed = MultilingualWordProcessor.normalize(word) else { return }
+
+        try database.transaction {
+            try upsertWordStat(
+                word: processed.text,
+                avgMs: avgMs,
+                frequencyDelta: frequencyDelta,
+                source: source.rawValue,
+                lastUsedAt: lastUsedAt
             )
-        } else {
-            try database.execute(
-                """
-                INSERT INTO word_stats (word, frequency, avg_ms, last_used_at, source)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                bindings: [
-                    .text(normalizedWord),
-                    .integer(Int64(frequencyDelta)),
-                    .double(avgMs),
-                    .double(now),
-                    .text(source)
-                ]
+            try upsertDailyWordStat(
+                word: processed.text,
+                avgMs: avgMs,
+                source: source,
+                frequencyDelta: frequencyDelta,
+                lastUsedAt: lastUsedAt
             )
         }
     }
 
-    public func recordChordOutput(_ output: String, source: String = "software") throws {
-        let now = Date().timeIntervalSince1970
-        let rows = try database.query(
-            "SELECT frequency FROM chord_stats WHERE output = ? AND source = ?",
-            bindings: [.text(output), .text(source)]
-        )
+    public func recordChordUsage(
+        output: String,
+        matchedChordId: UUID?,
+        source: UsageSource,
+        avgMs: Double,
+        confidence: ChordUsageConfidence,
+        ambiguityCount: Int = 0,
+        frequencyDelta: Int = 1,
+        lastUsedAt: Date = .now
+    ) throws {
+        let normalizedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedOutput.isEmpty else { return }
 
-        if let existing = rows.first {
-            let frequency = Int(existing.integer("frequency") ?? 0) + 1
-            try database.execute(
-                "UPDATE chord_stats SET frequency = ?, last_used_at = ? WHERE output = ? AND source = ?",
-                bindings: [.integer(Int64(frequency)), .double(now), .text(output), .text(source)]
+        try database.transaction {
+            try upsertChordStat(
+                output: normalizedOutput,
+                source: source.rawValue,
+                frequencyDelta: frequencyDelta,
+                lastUsedAt: lastUsedAt
             )
-        } else {
-            try database.execute(
-                "INSERT INTO chord_stats (output, frequency, last_used_at, source) VALUES (?, ?, ?, ?)",
-                bindings: [.text(output), .integer(1), .double(now), .text(source)]
+            try upsertDailyChordStat(
+                output: normalizedOutput,
+                matchedChordId: matchedChordId,
+                source: source,
+                avgMs: avgMs,
+                confidence: confidence,
+                ambiguityCount: ambiguityCount,
+                frequencyDelta: frequencyDelta,
+                lastUsedAt: lastUsedAt
             )
         }
+    }
+
+    public func recordChordOutput(_ output: String, source: String = "software", lastUsedAt: Date = .now) throws {
+        try upsertChordStat(output: output, source: source, frequencyDelta: 1, lastUsedAt: lastUsedAt)
     }
 
     public func wordStats(limit: Int = 200) throws -> [WordStat] {
@@ -458,6 +490,334 @@ public actor LibraryService {
         }
     }
 
+    public func dailyWordUsage(days: Int = 30, limit: Int = 100) throws -> [DailyWordUsage] {
+        let startDay = usageDay(for: Calendar.current.date(byAdding: .day, value: -(max(days, 1) - 1), to: Date()) ?? Date())
+        let rows = try database.query(
+            """
+            SELECT day, word, source, language, SUM(frequency) AS frequency,
+                   SUM(avg_ms * frequency) / SUM(frequency) AS avg_ms,
+                   MAX(last_used_at) AS last_used_at
+            FROM daily_word_stats
+            WHERE day >= ?
+            GROUP BY day, word, source, language
+            ORDER BY frequency DESC, last_used_at DESC
+            LIMIT ?
+            """,
+            bindings: [.text(startDay), .integer(Int64(limit))]
+        )
+
+        return rows.compactMap(decodeDailyWordUsage)
+    }
+
+    public func dailyChordUsage(days: Int = 30, limit: Int = 100) throws -> [DailyChordUsage] {
+        let startDay = usageDay(for: Calendar.current.date(byAdding: .day, value: -(max(days, 1) - 1), to: Date()) ?? Date())
+        let rows = try database.query(
+            """
+            SELECT day, output, matched_chord_id, source, SUM(frequency) AS frequency,
+                   SUM(avg_ms * frequency) / SUM(frequency) AS avg_ms,
+                   confidence, MAX(ambiguity_count) AS ambiguity_count,
+                   MAX(last_used_at) AS last_used_at
+            FROM daily_chord_stats
+            WHERE day >= ?
+            GROUP BY day, output, matched_chord_id, source, confidence
+            ORDER BY frequency DESC, last_used_at DESC
+            LIMIT ?
+            """,
+            bindings: [.text(startDay), .integer(Int64(limit))]
+        )
+
+        return rows.compactMap(decodeDailyChordUsage)
+    }
+
+    public func usageOverview(now: Date = .now) throws -> UsageOverview {
+        let today = usageDay(for: now)
+        let sevenDay = usageDay(for: Calendar.current.date(byAdding: .day, value: -6, to: now) ?? now)
+        let thirtyDay = usageDay(for: Calendar.current.date(byAdding: .day, value: -29, to: now) ?? now)
+
+        return UsageOverview(
+            wordsToday: try usageFrequency(table: "daily_word_stats", sinceDay: today),
+            chordsToday: try usageFrequency(table: "daily_chord_stats", sinceDay: today),
+            words7Days: try usageFrequency(table: "daily_word_stats", sinceDay: sevenDay),
+            chords7Days: try usageFrequency(table: "daily_chord_stats", sinceDay: sevenDay),
+            words30Days: try usageFrequency(table: "daily_word_stats", sinceDay: thirtyDay),
+            chords30Days: try usageFrequency(table: "daily_chord_stats", sinceDay: thirtyDay),
+            wordsAllTime: try usageFrequency(table: "daily_word_stats", sinceDay: nil),
+            chordsAllTime: try usageFrequency(table: "daily_chord_stats", sinceDay: nil)
+        )
+    }
+
+    /// Ranks actually typed words and joins them to enabled M4G chord outputs.
+    /// `days == nil` means all recorded history; otherwise the current day is
+    /// included in the requested rolling window.
+    public func wordCoverageReport(
+        days: Int? = 30,
+        language: WordLanguage? = nil,
+        limitPerGroup: Int = 100,
+        now: Date = .now
+    ) throws -> WordCoverageReport {
+        var predicates: [String] = []
+        var bindings: [SQLiteValue] = []
+        if let days {
+            let start = Calendar.current.date(
+                byAdding: .day,
+                value: -(max(days, 1) - 1),
+                to: now
+            ) ?? now
+            predicates.append("day >= ?")
+            bindings.append(.text(usageDay(for: start)))
+        }
+        if let language {
+            predicates.append("language = ?")
+            bindings.append(.text(language.rawValue))
+        }
+        let whereClause = predicates.isEmpty ? "" : "WHERE \(predicates.joined(separator: " AND "))"
+
+        let rows = try database.query(
+            """
+            SELECT word, language,
+                   SUM(frequency) AS frequency,
+                   SUM(avg_ms * frequency) / SUM(frequency) AS avg_ms,
+                   MAX(last_used_at) AS last_used_at
+            FROM daily_word_stats
+            \(whereClause)
+            GROUP BY word, language
+            ORDER BY frequency DESC, last_used_at DESC, word ASC
+            """,
+            bindings: bindings
+        )
+
+        var chordsByWord: [String: [ChordEntry]] = [:]
+        for chord in try deviceChords() {
+            guard let plainOutput = chord.plainOutput else { continue }
+            let outputWords = MultilingualWordProcessor.words(in: plainOutput)
+            guard outputWords.count == 1, let outputWord = outputWords.first else { continue }
+            chordsByWord[outputWord.text, default: []].append(chord)
+        }
+        for key in chordsByWord.keys {
+            chordsByWord[key]?.sort { lhs, rhs in
+                if lhs.updatedAt == rhs.updatedAt { return lhs.normalizedInput < rhs.normalizedInput }
+                return lhs.updatedAt > rhs.updatedAt
+            }
+        }
+
+        let words = rows.compactMap { row -> WordCoverageStat? in
+            guard let word = row.string("word"),
+                  let languageText = row.string("language"),
+                  let frequency = row.integer("frequency"),
+                  let avgMs = row.double("avg_ms"),
+                  let lastUsedAt = row.double("last_used_at") else { return nil }
+            return WordCoverageStat(
+                word: word,
+                language: WordLanguage(rawValue: languageText) ?? .other,
+                frequency: Int(frequency),
+                avgMs: avgMs,
+                lastUsedAt: Date(timeIntervalSince1970: lastUsedAt),
+                matchingChords: chordsByWord[word] ?? []
+            )
+        }
+
+        let covered = words.filter(\.isCovered)
+        let uncovered = words.filter { !$0.isCovered }
+        return WordCoverageReport(
+            totalOccurrences: words.reduce(0) { $0 + $1.frequency },
+            coveredOccurrences: covered.reduce(0) { $0 + $1.frequency },
+            uniqueWords: words.count,
+            coveredUniqueWords: covered.count,
+            coveredWords: Array(covered.prefix(max(limitPerGroup, 0))),
+            uncoveredWords: Array(uncovered.prefix(max(limitPerGroup, 0)))
+        )
+    }
+
+    public func twoKeyChordImpactReport(limit: Int = 200) throws -> [TwoKeyChordImpact] {
+        let allDailyUsage = try database.query(
+            """
+            SELECT output, matched_chord_id, SUM(frequency) AS frequency,
+                   SUM(CASE WHEN day >= ? THEN frequency ELSE 0 END) AS frequency_7,
+                   SUM(CASE WHEN day >= ? THEN frequency ELSE 0 END) AS frequency_30,
+                   MAX(last_used_at) AS last_used_at,
+                   confidence,
+                   MAX(ambiguity_count) AS ambiguity_count
+            FROM daily_chord_stats
+            GROUP BY output, matched_chord_id, confidence
+            """,
+            bindings: [
+                .text(usageDay(for: Calendar.current.date(byAdding: .day, value: -6, to: Date()) ?? Date())),
+                .text(usageDay(for: Calendar.current.date(byAdding: .day, value: -29, to: Date()) ?? Date()))
+            ]
+        )
+
+        var usageByChordID: [UUID: (total: Int, seven: Int, thirty: Int, last: Date?, confidence: ChordUsageConfidence?, ambiguity: Int)] = [:]
+        var usageByOutput: [String: (total: Int, seven: Int, thirty: Int, last: Date?, confidence: ChordUsageConfidence?, ambiguity: Int)] = [:]
+
+        for row in allDailyUsage {
+            let total = Int(row.integer("frequency") ?? 0)
+            let seven = Int(row.integer("frequency_7") ?? 0)
+            let thirty = Int(row.integer("frequency_30") ?? 0)
+            let last = row.double("last_used_at").map(Date.init(timeIntervalSince1970:))
+            let confidence = row.string("confidence").flatMap(ChordUsageConfidence.init(rawValue:))
+            let ambiguity = Int(row.integer("ambiguity_count") ?? 0)
+            let value = (total, seven, thirty, last, confidence, ambiguity)
+
+            if let idText = row.string("matched_chord_id"), !idText.isEmpty, let id = UUID(uuidString: idText) {
+                usageByChordID[id] = value
+            } else if let output = row.string("output")?.lowercased(), !output.isEmpty {
+                usageByOutput[output] = value
+            }
+        }
+
+        return try deviceChords()
+            .filter { chord in
+                let input = chord.displayInput.isEmpty ? chord.inputKeys : chord.displayInput
+                return input.count == 2
+            }
+            .map { chord in
+                let outputKey = (chord.plainOutput ?? chord.output).lowercased()
+                let usage = usageByChordID[chord.id] ?? usageByOutput[outputKey] ?? (0, 0, 0, nil, nil, 0)
+                return TwoKeyChordImpact(
+                    chord: chord,
+                    totalFrequency: usage.total,
+                    frequency7Days: usage.seven,
+                    frequency30Days: usage.thirty,
+                    lastUsedAt: usage.last,
+                    confidence: usage.confidence,
+                    ambiguityCount: usage.ambiguity
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.totalFrequency == rhs.totalFrequency {
+                    return lhs.chord.output < rhs.chord.output
+                }
+                return lhs.totalFrequency > rhs.totalFrequency
+            }
+            .prefix(limit)
+            .map { $0 }
+    }
+
+    private func upsertChordStat(output: String, source: String, frequencyDelta: Int, lastUsedAt: Date) throws {
+        let lastUsed = lastUsedAt.timeIntervalSince1970
+        let rows = try database.query(
+            "SELECT frequency, last_used_at FROM chord_stats WHERE output = ? AND source = ?",
+            bindings: [.text(output), .text(source)]
+        )
+
+        if let existing = rows.first {
+            let frequency = Int(existing.integer("frequency") ?? 0) + frequencyDelta
+            let newLastUsed = max(existing.double("last_used_at") ?? lastUsed, lastUsed)
+            try database.execute(
+                "UPDATE chord_stats SET frequency = ?, last_used_at = ? WHERE output = ? AND source = ?",
+                bindings: [.integer(Int64(frequency)), .double(newLastUsed), .text(output), .text(source)]
+            )
+        } else {
+            try database.execute(
+                "INSERT INTO chord_stats (output, frequency, last_used_at, source) VALUES (?, ?, ?, ?)",
+                bindings: [.text(output), .integer(Int64(frequencyDelta)), .double(lastUsed), .text(source)]
+            )
+        }
+    }
+
+    private func upsertDailyWordStat(
+        word: String,
+        avgMs: Double,
+        source: UsageSource,
+        frequencyDelta: Int,
+        lastUsedAt: Date
+    ) throws {
+        guard let processed = MultilingualWordProcessor.normalize(word) else { return }
+        let day = usageDay(for: lastUsedAt)
+        let lastUsed = lastUsedAt.timeIntervalSince1970
+        try database.execute(
+            """
+            INSERT INTO daily_word_stats (day, word, source, frequency, avg_ms, last_used_at, language)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(day, word, source) DO UPDATE SET
+                avg_ms = ((daily_word_stats.avg_ms * daily_word_stats.frequency) +
+                          (excluded.avg_ms * excluded.frequency)) /
+                         (daily_word_stats.frequency + excluded.frequency),
+                frequency = daily_word_stats.frequency + excluded.frequency,
+                last_used_at = MAX(daily_word_stats.last_used_at, excluded.last_used_at),
+                language = excluded.language
+            """,
+            bindings: [
+                .text(day),
+                .text(processed.text),
+                .text(source.rawValue),
+                .integer(Int64(frequencyDelta)),
+                .double(avgMs),
+                .double(lastUsed),
+                .text(processed.language.rawValue)
+            ]
+        )
+    }
+
+    private func upsertDailyChordStat(
+        output: String,
+        matchedChordId: UUID?,
+        source: UsageSource,
+        avgMs: Double,
+        confidence: ChordUsageConfidence,
+        ambiguityCount: Int,
+        frequencyDelta: Int,
+        lastUsedAt: Date
+    ) throws {
+        let day = usageDay(for: lastUsedAt)
+        let matchedID = matchedChordId?.uuidString ?? ""
+        let lastUsed = lastUsedAt.timeIntervalSince1970
+        let rows = try database.query(
+            """
+            SELECT frequency, avg_ms, last_used_at
+            FROM daily_chord_stats
+            WHERE day = ? AND output = ? AND matched_chord_id = ? AND source = ? AND confidence = ?
+            """,
+            bindings: [.text(day), .text(output), .text(matchedID), .text(source.rawValue), .text(confidence.rawValue)]
+        )
+
+        if let existing = rows.first {
+            let oldFrequency = Int(existing.integer("frequency") ?? 0)
+            let oldAvg = existing.double("avg_ms") ?? avgMs
+            let newFrequency = oldFrequency + frequencyDelta
+            let weightedAvg = ((oldAvg * Double(oldFrequency)) + (avgMs * Double(frequencyDelta))) / Double(max(newFrequency, 1))
+            let newLastUsed = max(existing.double("last_used_at") ?? lastUsed, lastUsed)
+            try database.execute(
+                """
+                UPDATE daily_chord_stats
+                SET frequency = ?, avg_ms = ?, ambiguity_count = ?, last_used_at = ?
+                WHERE day = ? AND output = ? AND matched_chord_id = ? AND source = ? AND confidence = ?
+                """,
+                bindings: [
+                    .integer(Int64(newFrequency)),
+                    .double(weightedAvg),
+                    .integer(Int64(ambiguityCount)),
+                    .double(newLastUsed),
+                    .text(day),
+                    .text(output),
+                    .text(matchedID),
+                    .text(source.rawValue),
+                    .text(confidence.rawValue)
+                ]
+            )
+        } else {
+            try database.execute(
+                """
+                INSERT INTO daily_chord_stats (
+                    day, output, matched_chord_id, source, frequency, avg_ms, confidence, ambiguity_count, last_used_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                bindings: [
+                    .text(day),
+                    .text(output),
+                    .text(matchedID),
+                    .text(source.rawValue),
+                    .integer(Int64(frequencyDelta)),
+                    .double(avgMs),
+                    .text(confidence.rawValue),
+                    .integer(Int64(ambiguityCount)),
+                    .double(lastUsed)
+                ]
+            )
+        }
+    }
+
     public func sources() throws -> [DeviceSource] {
         try database.query(
             "SELECT id, port_path, device_name, firmware, chord_count, is_primary FROM sources ORDER BY is_primary DESC, chord_count DESC"
@@ -482,21 +842,45 @@ public actor LibraryService {
         }
     }
 
-    public func bannedWords() throws -> Set<String> {
-        let rows = try database.query("SELECT value FROM bans WHERE kind = 'word'")
-        return Set(rows.compactMap { $0.string("value") })
+    /// Removes usage that the old recorder attributed from text timing alone.
+    /// Those rows cannot be distinguished from normal fast keyboard input after
+    /// the fact, so they must not be mixed with physically confirmed HID usage.
+    /// This intentionally checks for reintroduced rows even after migration in
+    /// case an obsolete command-run process survived the app upgrade.
+    @discardableResult
+    public func migrateLegacyTimingInferencesIfNeeded() throws -> Bool {
+        let legacyRowCount = try database.query(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM word_stats WHERE source = 'm4g_output_inferred') +
+                (SELECT COUNT(*) FROM chord_stats WHERE source = 'm4g_output_inferred') +
+                (SELECT COUNT(*) FROM daily_word_stats WHERE source = 'm4g_output_inferred') +
+                (SELECT COUNT(*) FROM daily_chord_stats WHERE source = 'm4g_output_inferred')
+                AS legacy_row_count
+            """
+        ).first?.integer("legacy_row_count") ?? 0
+        let migrationCompleted = try stringSetting(forKey: Self.HIDAttributionMigrationKey) == "complete"
+        guard !migrationCompleted || legacyRowCount > 0 else {
+            return false
+        }
+
+        try database.transaction {
+            try database.execute("DELETE FROM word_stats WHERE source = 'm4g_output_inferred'")
+            try database.execute("DELETE FROM chord_stats WHERE source = 'm4g_output_inferred'")
+            try database.execute("DELETE FROM daily_word_stats WHERE source = 'm4g_output_inferred'")
+            try database.execute("DELETE FROM daily_chord_stats WHERE source = 'm4g_output_inferred'")
+            try database.execute("DELETE FROM suggestions")
+        }
+        for profile in ErgonomicProfile.allCases {
+            _ = try regenerateSuggestions(profile: profile)
+        }
+        try setSetting(Self.HIDAttributionMigrationKey, value: "complete")
+        return true
     }
 
     public func bannedInputs() throws -> Set<String> {
         let rows = try database.query("SELECT value FROM bans WHERE kind = 'chord'")
         return Set(rows.compactMap { $0.string("value") })
-    }
-
-    public func banWord(_ word: String) throws {
-        try database.execute(
-            "INSERT OR REPLACE INTO bans (kind, value, created_at) VALUES ('word', ?, ?)",
-            bindings: [.text(word.lowercased()), .double(Date().timeIntervalSince1970)]
-        )
     }
 
     public func banChordInput(_ normalizedInput: String) throws {
@@ -539,7 +923,7 @@ public actor LibraryService {
             profile: profile,
             words: words,
             existingChords: existingChords,
-            bannedWords: try bannedWords(),
+            availableChords: try allEnabledChords(),
             bannedInputs: try bannedInputs(),
             limit: limit
         )
@@ -569,6 +953,16 @@ public actor LibraryService {
         }
 
         return suggestions
+    }
+
+    private func allEnabledChords() throws -> [ChordEntry] {
+        try fetchChords(
+            """
+            SELECT \(Self.chordColumns)
+            FROM chords
+            WHERE enabled = 1
+            """
+        )
     }
 
     public func adviseChord(
@@ -702,12 +1096,38 @@ public actor LibraryService {
 
     private func importStats(_ bundle: ImportedStatsBundle) throws {
         for word in bundle.words {
-            try upsertWordStat(word: word.word, avgMs: word.avgMs, frequencyDelta: word.frequency, source: word.source)
+            try upsertWordStat(
+                word: word.word,
+                avgMs: word.avgMs,
+                frequencyDelta: word.frequency,
+                source: UsageSource.nexusImport.rawValue,
+                lastUsedAt: word.lastUsedAt
+            )
+            try upsertDailyWordStat(
+                word: word.word.lowercased(),
+                avgMs: word.avgMs,
+                source: .nexusImport,
+                frequencyDelta: word.frequency,
+                lastUsedAt: word.lastUsedAt
+            )
         }
         for chord in bundle.chords {
-            for _ in 0..<max(chord.frequency, 1) {
-                try recordChordOutput(chord.output, source: chord.source)
-            }
+            try upsertChordStat(
+                output: chord.output,
+                source: UsageSource.nexusImport.rawValue,
+                frequencyDelta: chord.frequency,
+                lastUsedAt: chord.lastUsedAt
+            )
+            try upsertDailyChordStat(
+                output: chord.output,
+                matchedChordId: nil,
+                source: .nexusImport,
+                avgMs: 0,
+                confidence: .nexusImport,
+                ambiguityCount: 0,
+                frequencyDelta: chord.frequency,
+                lastUsedAt: chord.lastUsedAt
+            )
         }
     }
 
@@ -717,7 +1137,8 @@ public actor LibraryService {
             SELECT word,
                    SUM(frequency) AS frequency,
                    SUM(avg_ms * frequency) / SUM(frequency) AS avg_ms,
-                   MAX(last_used_at) AS last_used_at
+                   MAX(last_used_at) AS last_used_at,
+                   MAX(language) AS language
             FROM word_stats
             GROUP BY word
             ORDER BY frequency DESC, last_used_at DESC
@@ -730,7 +1151,8 @@ public actor LibraryService {
             guard let word = row.string("word"),
                   let frequency = row.integer("frequency"),
                   let avgMs = row.double("avg_ms"),
-                  let lastUsedAt = row.double("last_used_at") else {
+                  let lastUsedAt = row.double("last_used_at"),
+                  let languageText = row.string("language") else {
                 return nil
             }
             return WordStat(
@@ -738,7 +1160,8 @@ public actor LibraryService {
                 frequency: Int(frequency),
                 avgMs: avgMs,
                 lastUsedAt: Date(timeIntervalSince1970: lastUsedAt),
-                source: "aggregate"
+                source: "aggregate",
+                language: WordLanguage(rawValue: languageText) ?? .other
             )
         }
     }
@@ -822,6 +1245,84 @@ public actor LibraryService {
             source: source,
             createdAt: Date(timeIntervalSince1970: createdAt),
             updatedAt: Date(timeIntervalSince1970: updatedAt)
+        )
+    }
+
+    private func decodeDailyWordUsage(_ row: SQLiteRow) -> DailyWordUsage? {
+        guard let day = row.string("day"),
+              let word = row.string("word"),
+              let sourceText = row.string("source"),
+              let source = UsageSource(rawValue: sourceText),
+              let frequency = row.integer("frequency"),
+              let avgMs = row.double("avg_ms"),
+              let lastUsedAt = row.double("last_used_at"),
+              let languageText = row.string("language") else {
+            return nil
+        }
+
+        return DailyWordUsage(
+            day: day,
+            word: word,
+            source: source,
+            frequency: Int(frequency),
+            avgMs: avgMs,
+            lastUsedAt: Date(timeIntervalSince1970: lastUsedAt),
+            language: WordLanguage(rawValue: languageText) ?? .other
+        )
+    }
+
+    private func decodeDailyChordUsage(_ row: SQLiteRow) -> DailyChordUsage? {
+        guard let day = row.string("day"),
+              let output = row.string("output"),
+              let sourceText = row.string("source"),
+              let source = UsageSource(rawValue: sourceText),
+              let frequency = row.integer("frequency"),
+              let avgMs = row.double("avg_ms"),
+              let confidenceText = row.string("confidence"),
+              let confidence = ChordUsageConfidence(rawValue: confidenceText),
+              let ambiguityCount = row.integer("ambiguity_count"),
+              let lastUsedAt = row.double("last_used_at") else {
+            return nil
+        }
+
+        let matchedChordId = row.string("matched_chord_id")
+            .flatMap { $0.isEmpty ? nil : UUID(uuidString: $0) }
+        return DailyChordUsage(
+            day: day,
+            output: output,
+            matchedChordId: matchedChordId,
+            source: source,
+            frequency: Int(frequency),
+            avgMs: avgMs,
+            confidence: confidence,
+            ambiguityCount: Int(ambiguityCount),
+            lastUsedAt: Date(timeIntervalSince1970: lastUsedAt)
+        )
+    }
+
+    private func usageFrequency(table: String, sinceDay: String?) throws -> Int {
+        let allowedTables = Set(["daily_word_stats", "daily_chord_stats"])
+        guard allowedTables.contains(table) else { return 0 }
+
+        let rows: [SQLiteRow]
+        if let sinceDay {
+            rows = try database.query(
+                "SELECT COALESCE(SUM(frequency), 0) AS frequency FROM \(table) WHERE day >= ?",
+                bindings: [.text(sinceDay)]
+            )
+        } else {
+            rows = try database.query("SELECT COALESCE(SUM(frequency), 0) AS frequency FROM \(table)")
+        }
+        return Int(rows.first?.integer("frequency") ?? 0)
+    }
+
+    private func usageDay(for date: Date) -> String {
+        let components = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return String(
+            format: "%04d-%02d-%02d",
+            components.year ?? 1970,
+            components.month ?? 1,
+            components.day ?? 1
         )
     }
 

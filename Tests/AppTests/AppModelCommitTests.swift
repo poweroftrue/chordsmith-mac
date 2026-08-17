@@ -130,6 +130,27 @@ final class AppModelCommitTests: XCTestCase {
         )
     }
 
+    func testAdvisorCommitsPDFWithOriginalCapitalization() async throws {
+        let fixture = try AppModelFixture()
+
+        await fixture.model.adviseChord(for: "PDF")
+        let candidate = try XCTUnwrap(fixture.model.advisorCandidates.first)
+        await fixture.model.acceptAdvisorCandidate(candidate, word: "PDF")
+
+        XCTAssertEqual(fixture.model.stagedChanges.first?.chord.output, "PDF")
+        await fixture.model.commitStagedChanges()
+
+        let storedChords = try await fixture.library.allChords()
+        let stored = try XCTUnwrap(storedChords.first)
+        XCTAssertEqual(stored.output, "PDF")
+        XCTAssertTrue(fixture.device.appliedMutationBatches().joined().contains { mutation in
+            if case .upsert(let record) = mutation {
+                return record.output == "PDF"
+            }
+            return false
+        })
+    }
+
     func testQuickAdvisorCandidatesDoNotMutateMainAdvisorState() async throws {
         let fixture = try AppModelFixture()
         let sentinelCandidate = Candidate(
@@ -552,7 +573,7 @@ private final class AppModelFixture {
     init() throws {
         tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
-        library = try LibraryService(databaseURL: tempDirectory.appendingPathComponent("charaworder.sqlite3"))
+        library = try LibraryService(databaseURL: tempDirectory.appendingPathComponent("chordsmith.sqlite3"))
         device = FakeAppDeviceService()
         source = DeviceSource(
             portPath: "/dev/cu.test",

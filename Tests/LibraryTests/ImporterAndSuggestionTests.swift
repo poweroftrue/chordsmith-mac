@@ -5,8 +5,8 @@ import XCTest
 
 final class ImporterAndSuggestionTests: XCTestCase {
     func testLatestM4GChordFileRoundTripsAndImportsLosslessly() async throws {
-        guard let fixturePath = ProcessInfo.processInfo.environment["CHARAWORDER_M4G_EXPORT_FIXTURE"] else {
-            throw XCTSkip("Set CHARAWORDER_M4G_EXPORT_FIXTURE to run the full M4G export round-trip fixture.")
+        guard let fixturePath = ProcessInfo.processInfo.environment["CHORDSMITH_M4G_EXPORT_FIXTURE"] else {
+            throw XCTSkip("Set CHORDSMITH_M4G_EXPORT_FIXTURE to run the full M4G export round-trip fixture.")
         }
         let url = URL(fileURLWithPath: fixturePath)
         try XCTSkipIf(!FileManager.default.fileExists(atPath: url.path), "Latest M4G chord export is not available on this machine.")
@@ -26,7 +26,7 @@ final class ImporterAndSuggestionTests: XCTestCase {
 
         let temp = try TemporaryDirectory()
         defer { temp.remove() }
-        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("charaworder.sqlite3"))
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
         let count = try await library.importCharaChordFile(at: url, source: "M4G JSON")
         XCTAssertEqual(count, 2_177)
 
@@ -42,7 +42,7 @@ final class ImporterAndSuggestionTests: XCTestCase {
         let temp = try TemporaryDirectory()
         defer { temp.remove() }
 
-        let databaseURL = temp.url.appendingPathComponent("charaworder.sqlite3")
+        let databaseURL = temp.url.appendingPathComponent("chordsmith.sqlite3")
         let nexusURL = temp.url.appendingPathComponent("nexus.sqlite3")
         let freechorderURL = temp.url.appendingPathComponent("chords.yaml")
 
@@ -95,13 +95,170 @@ final class ImporterAndSuggestionTests: XCTestCase {
         let errorWord = try XCTUnwrap(words.first(where: { $0.word == "error" }))
         XCTAssertEqual(errorWord.frequency, 7)
         XCTAssertEqual(errorWord.source, "aggregate")
+        XCTAssertEqual(errorWord.lastUsedAt.timeIntervalSince1970, 1_710_000_000, accuracy: 0.001)
 
         let chordStats = try await library.chordStats(limit: 10)
         let thereStat = try XCTUnwrap(chordStats.first(where: { $0.output == "there" }))
         XCTAssertEqual(thereStat.frequency, 3)
+        XCTAssertEqual(thereStat.lastUsedAt.timeIntervalSince1970, 1_710_000_500, accuracy: 0.001)
+
+        let importedWords = try await library.dailyWordUsage(days: 10_000, limit: 10)
+        let importedError = try XCTUnwrap(importedWords.first(where: { $0.word == "error" }))
+        XCTAssertEqual(importedError.source, .nexusImport)
+        XCTAssertEqual(importedError.frequency, 7)
+        XCTAssertEqual(importedError.lastUsedAt.timeIntervalSince1970, 1_710_000_000, accuracy: 0.001)
+
+        let importedChords = try await library.dailyChordUsage(days: 10_000, limit: 10)
+        let importedThere = try XCTUnwrap(importedChords.first(where: { $0.output == "there" }))
+        XCTAssertEqual(importedThere.source, .nexusImport)
+        XCTAssertEqual(importedThere.confidence, .nexusImport)
+        XCTAssertEqual(importedThere.frequency, 3)
+        XCTAssertEqual(importedThere.lastUsedAt.timeIntervalSince1970, 1_710_000_500, accuracy: 0.001)
 
         let deviceSuggestions = try await library.listSuggestions(profile: .cc2A1, limit: 20)
         XCTAssertFalse(deviceSuggestions.isEmpty)
+    }
+
+    func testDailyUsageAggregatesMergeAndOverviewRollsUp() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let now = Date()
+        let later = now.addingTimeInterval(10)
+        let chordId = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+
+        try await library.recordWordUsage(word: "there", avgMs: 100, source: .keyboard, lastUsedAt: now)
+        try await library.recordWordUsage(word: "there", avgMs: 300, source: .keyboard, lastUsedAt: later)
+        try await library.recordChordUsage(
+            output: "there",
+            matchedChordId: chordId,
+            source: .m4gHIDConfirmed,
+            avgMs: 40,
+            confidence: .confirmedHardware,
+            lastUsedAt: now
+        )
+        try await library.recordChordUsage(
+            output: "there",
+            matchedChordId: chordId,
+            source: .m4gHIDConfirmed,
+            avgMs: 80,
+            confidence: .confirmedHardware,
+            lastUsedAt: later
+        )
+
+        let words = try await library.dailyWordUsage(days: 1, limit: 10)
+        let word = try XCTUnwrap(words.first(where: { $0.word == "there" && $0.source == .keyboard }))
+        XCTAssertEqual(word.frequency, 2)
+        XCTAssertEqual(word.avgMs, 200, accuracy: 0.001)
+        XCTAssertEqual(word.lastUsedAt.timeIntervalSince1970, later.timeIntervalSince1970, accuracy: 0.001)
+
+        let chords = try await library.dailyChordUsage(days: 1, limit: 10)
+        let chord = try XCTUnwrap(chords.first(where: { $0.output == "there" && $0.source == .m4gHIDConfirmed }))
+        XCTAssertEqual(chord.frequency, 2)
+        XCTAssertEqual(chord.avgMs, 60, accuracy: 0.001)
+        XCTAssertEqual(chord.matchedChordId, chordId)
+        XCTAssertEqual(chord.confidence, .confirmedHardware)
+
+        let overview = try await library.usageOverview(now: later)
+        XCTAssertEqual(overview.wordsToday, 2)
+        XCTAssertEqual(overview.chordsToday, 2)
+        XCTAssertEqual(overview.words7Days, 2)
+        XCTAssertEqual(overview.chords7Days, 2)
+        XCTAssertEqual(overview.wordsAllTime, 2)
+        XCTAssertEqual(overview.chordsAllTime, 2)
+    }
+
+    func testLegacyTimingInferencesAreRemovedExactlyOnce() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+        let databaseURL = temp.url.appendingPathComponent("chordsmith.sqlite3")
+        let library = try LibraryService(databaseURL: databaseURL)
+
+        try await library.recordWordUsage(
+            word: "trusted",
+            avgMs: 400,
+            source: .keyboard
+        )
+        try executeSQLite(
+            at: databaseURL,
+            sql: """
+            INSERT INTO word_stats (word, frequency, avg_ms, last_used_at, source)
+            VALUES ('legacy', 9, 20, 1000, 'm4g_output_inferred');
+            INSERT INTO chord_stats VALUES ('legacy', 9, 1000, 'm4g_output_inferred');
+            INSERT INTO daily_word_stats (day, word, source, frequency, avg_ms, last_used_at)
+            VALUES ('2026-08-12', 'legacy', 'm4g_output_inferred', 9, 20, 1000);
+            INSERT INTO daily_chord_stats VALUES ('2026-08-12', 'legacy', '', 'm4g_output_inferred', 9, 20, 'inferred_hardware', 0, 1000);
+            """
+        )
+
+        let firstCleanup = try await library.migrateLegacyTimingInferencesIfNeeded()
+        let secondCleanup = try await library.migrateLegacyTimingInferencesIfNeeded()
+        XCTAssertTrue(firstCleanup)
+        XCTAssertFalse(secondCleanup)
+
+        try executeSQLite(
+            at: databaseURL,
+            sql: """
+            INSERT INTO word_stats (word, frequency, avg_ms, last_used_at, source)
+            VALUES ('reintroduced', 1, 20, 1001, 'm4g_output_inferred');
+            """
+        )
+        let cleanupAfterLegacyProcessWritesAgain = try await library.migrateLegacyTimingInferencesIfNeeded()
+        XCTAssertTrue(cleanupAfterLegacyProcessWritesAgain)
+
+        let words = try await library.wordStats(limit: 10)
+        XCTAssertTrue(words.contains { $0.word == "trusted" && $0.frequency == 1 })
+        XCTAssertFalse(words.contains { $0.word == "legacy" })
+        let chords = try await library.chordStats(limit: 10)
+        XCTAssertTrue(chords.isEmpty)
+        XCTAssertEqual(try sqliteScalar(
+            at: databaseURL,
+            sql: """
+            SELECT
+                (SELECT COUNT(*) FROM word_stats WHERE source = 'm4g_output_inferred') +
+                (SELECT COUNT(*) FROM chord_stats WHERE source = 'm4g_output_inferred') +
+                (SELECT COUNT(*) FROM daily_word_stats WHERE source = 'm4g_output_inferred') +
+                (SELECT COUNT(*) FROM daily_chord_stats WHERE source = 'm4g_output_inferred')
+            """
+        ), 0)
+    }
+
+    func testTwoKeyChordImpactReportRanksByRecordedUsage() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let there = ChordEntry(inputKeys: ["t", "h"], output: "there", profile: .cc2A1, deploymentTarget: .device, source: "test")
+        let and = ChordEntry(inputKeys: ["a", "n"], output: "and", profile: .cc2A1, deploymentTarget: .device, source: "test")
+        let long = ChordEntry(inputKeys: ["p", "h", "l"], output: "philosophy", profile: .cc2A1, deploymentTarget: .device, source: "test")
+
+        try await library.upsertChord(there)
+        try await library.upsertChord(and)
+        try await library.upsertChord(long)
+
+        try await library.recordChordUsage(
+            output: "and",
+            matchedChordId: and.id,
+            source: .m4gHIDConfirmed,
+            avgMs: 30,
+            confidence: .confirmedHardware,
+            frequencyDelta: 2
+        )
+        try await library.recordChordUsage(
+            output: "there",
+            matchedChordId: there.id,
+            source: .m4gHIDConfirmed,
+            avgMs: 40,
+            confidence: .confirmedHardware,
+            frequencyDelta: 8
+        )
+
+        let report = try await library.twoKeyChordImpactReport(limit: 10)
+        XCTAssertEqual(report.map(\.chord.output), ["there", "and"])
+        XCTAssertEqual(report.first?.totalFrequency, 8)
+        XCTAssertEqual(report.first?.frequency7Days, 8)
+        XCTAssertEqual(report.first?.confidence, .confirmedHardware)
     }
 
     func testSuggestionEngineRejectsSameSwitchCandidatesOnCC2() {
@@ -120,7 +277,6 @@ final class ImporterAndSuggestionTests: XCTestCase {
             profile: .cc2A1,
             words: words,
             existingChords: [],
-            bannedWords: [],
             bannedInputs: [],
             limit: 10
         )
@@ -130,6 +286,95 @@ final class ImporterAndSuggestionTests: XCTestCase {
         let candidates = suggestion?.candidates ?? []
         XCTAssertFalse(candidates.isEmpty)
         XCTAssertFalse(candidates.contains { Set($0.inputKeys).isSuperset(of: ["e", "r"]) })
+    }
+
+    func testAdvisorFindsConflictFreeFallbackWhenPDFLettersShareOneM4GSwitch() {
+        let physicalModel = M4GPhysicalModel.defaultA1
+        XCTAssertFalse(physicalModel.hardConflictReasons(for: ["p", "d"]).isEmpty)
+        XCTAssertFalse(physicalModel.hardConflictReasons(for: ["p", "f"]).isEmpty)
+        XCTAssertFalse(physicalModel.hardConflictReasons(for: ["d", "f"]).isEmpty)
+
+        let candidates = SuggestionEngine().adviseChord(
+            for: "PDF",
+            profile: .cc2A1,
+            existingChords: [],
+            limit: 10
+        )
+
+        let pdfLetters = Set(["p", "d", "f"])
+        XCTAssertFalse(candidates.isEmpty)
+        XCTAssertEqual(Set(candidates.first?.inputKeys ?? []), Set([".", "p"]))
+        XCTAssertTrue(candidates.allSatisfy { candidate in
+            candidate.hardFailures.isEmpty
+                && !pdfLetters.isDisjoint(with: candidate.inputKeys)
+                && physicalModel.hardConflictReasons(for: candidate.inputKeys).isEmpty
+        })
+        XCTAssertTrue(candidates.contains { candidate in
+            candidate.softReasons.contains { $0.contains("Conflict-free mnemonic fallback") }
+        })
+    }
+
+    func testSuggestionEngineRecommendsExistingPlainOutputWithoutNewCandidates() {
+        let engine = SuggestionEngine()
+        let existing = ChordEntry(
+            inputKeys: ["c", "h", "r"],
+            output: "<c><h><a><r><a><c><h><o><r><d><e><r>",
+            plainOutput: "CharaChorder",
+            profile: .cc2A1,
+            deploymentTarget: .device,
+            source: "test"
+        )
+        let words = [
+            WordStat(
+                word: "charachorder",
+                frequency: 10,
+                avgMs: 500,
+                lastUsedAt: Date(timeIntervalSince1970: 1_000),
+                source: "test"
+            )
+        ]
+
+        let suggestions = engine.generateSuggestions(
+            profile: .cc2A1,
+            words: words,
+            existingChords: [existing],
+            bannedInputs: [],
+            limit: 10
+        )
+
+        XCTAssertEqual(suggestions.count, 1)
+        XCTAssertEqual(suggestions.first?.acceptedChordId, existing.id)
+        XCTAssertEqual(suggestions.first?.candidates.first?.inputKeys, ["c", "h", "r"])
+    }
+
+    func testSuggestionRebuildRecommendsExistingOutputFromAnotherProfile() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let existing = ChordEntry(
+            inputKeys: ["c", "h", "r"],
+            output: "CharaChorder",
+            profile: .cc2A1,
+            deploymentTarget: .device,
+            source: "test"
+        )
+
+        try await library.upsertChord(existing)
+        try await library.recordWordUsage(
+            word: "charachorder",
+            avgMs: 500,
+            source: .keyboard,
+            frequencyDelta: 10
+        )
+
+        let suggestions = try await library.regenerateSuggestions(profile: .ansiQwerty)
+
+        let suggestion = try XCTUnwrap(suggestions.first { $0.word == "charachorder" })
+        XCTAssertEqual(suggestion.acceptedChordId, existing.id)
+        XCTAssertEqual(suggestion.candidates.first?.inputKeys, ["c", "h", "r"])
+
+        let stored = try await library.listSuggestions(profile: .ansiQwerty)
+        XCTAssertEqual(stored.first { $0.word == "charachorder" }?.acceptedChordId, existing.id)
     }
 
     func testEnglishMorphologyIndexFindsInflectionsAndDerivations() throws {
@@ -457,7 +702,7 @@ final class ImporterAndSuggestionTests: XCTestCase {
     func testChordFeedbackStarPersistsLocally() async throws {
         let temp = try TemporaryDirectory()
         defer { temp.remove() }
-        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("charaworder.sqlite3"))
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
         let chord = ChordEntry(
             inputKeys: ["i", "p", "r", "s", "v"],
             output: "impressive",
@@ -484,7 +729,7 @@ final class ImporterAndSuggestionTests: XCTestCase {
         let temp = try TemporaryDirectory()
         defer { temp.remove() }
 
-        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("charaworder.sqlite3"))
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
 
         let original = ChordEntry(
             id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
@@ -537,6 +782,42 @@ private func isLegacyParserPlainPhrase(_ actions: [Int]) -> Bool {
         (48...57 ~= action) ||
         (97...122 ~= action)
     }
+}
+
+private func executeSQLite(at url: URL, sql: String) throws {
+    var database: OpaquePointer?
+    guard sqlite3_open(url.path, &database) == SQLITE_OK, let database else {
+        throw NSError(domain: "SQLiteTest", code: 1)
+    }
+    defer { sqlite3_close(database) }
+
+    var errorMessage: UnsafeMutablePointer<CChar>?
+    guard sqlite3_exec(database, sql, nil, nil, &errorMessage) == SQLITE_OK else {
+        let message = errorMessage.map { String(cString: $0) } ?? "SQLite execution failed"
+        sqlite3_free(errorMessage)
+        throw NSError(domain: "SQLiteTest", code: 2, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+private func sqliteScalar(at url: URL, sql: String) throws -> Int {
+    var database: OpaquePointer?
+    guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+          let database else {
+        throw NSError(domain: "SQLiteTest", code: 3)
+    }
+    defer { sqlite3_close(database) }
+
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+          let statement else {
+        throw NSError(domain: "SQLiteTest", code: 4)
+    }
+    defer { sqlite3_finalize(statement) }
+
+    guard sqlite3_step(statement) == SQLITE_ROW else {
+        throw NSError(domain: "SQLiteTest", code: 5)
+    }
+    return Int(sqlite3_column_int64(statement, 0))
 }
 
 private func createNexusFixture(at url: URL) throws {
