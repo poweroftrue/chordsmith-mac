@@ -7,6 +7,8 @@ import SwiftUI
 /// each with a conflict-free chord, staged together and committed once.
 struct GrowTabView: View {
     @ObservedObject var model: AppModel
+    @State private var mergeWordsText = ""
+    @State private var mergeTargetText = ""
 
     private var stagedWords: Set<String> { model.stagedOutputs() }
 
@@ -104,6 +106,8 @@ struct GrowTabView: View {
                 footer
             }
 
+            mergedSection
+
             if !model.growthPlan.skippedWords.isEmpty {
                 Section("Skipped") {
                     ForEach(model.growthPlan.skippedWords, id: \.self) { word in
@@ -121,6 +125,51 @@ struct GrowTabView: View {
             }
         }
         .listStyle(.plain)
+    }
+
+    private var mergedSection: some View {
+        Section {
+            ForEach(model.growthPlan.aliases.sorted { $0.key < $1.key }, id: \.key) { word, target in
+                HStack {
+                    Text(word)
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "arrow.right")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(target)
+                    Spacer()
+                    Button("Unmerge") {
+                        Task { await model.unmergeWord(word) }
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            HStack(spacing: 6) {
+                TextField("Pieces, e.g. zelv, zel", text: $mergeWordsText)
+                    .textFieldStyle(.roundedBorder)
+                Image(systemName: "arrow.right")
+                    .foregroundStyle(.secondary)
+                TextField("Real word", text: $mergeTargetText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 140)
+                Button("Merge") {
+                    let words = mergeWordsText.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init)
+                    let target = mergeTargetText
+                    Task {
+                        await model.mergeWords(words, into: target)
+                        mergeWordsText = ""
+                        mergeTargetText = ""
+                    }
+                }
+                .disabled(mergeWordsText.isEmpty || mergeTargetText.isEmpty)
+            }
+        } header: {
+            Text("Merged words")
+        } footer: {
+            Text("Autocomplete only sends the letters you typed, so a word you finish with Tab shows up as its first few letters. Merged pieces and misspellings count toward the real word. Pieces you finish with Tab or → at least half the time are merged automatically.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder
@@ -200,6 +249,28 @@ private struct GrowRow: View {
                 Text(detail)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+
+                if !item.mergedWords.isEmpty {
+                    Text("Also counts \(item.mergedWords.joined(separator: ", "))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                if let target = item.possibleCompletionOf {
+                    let pieces = Array(Set(item.completionFragments + [item.word])).sorted()
+                    Button {
+                        Task { await model.mergeWords(pieces, into: target) }
+                    } label: {
+                        Label(
+                            "Start of \(target)? Count \(pieces.joined(separator: ", ")) as \(target)",
+                            systemImage: "arrow.triangle.merge"
+                        )
+                        .font(.caption)
+                    }
+                    .buttonStyle(.link)
+                    .help("You probably type the first letters and finish with autocomplete.")
+                }
             }
 
             Spacer(minLength: 0)

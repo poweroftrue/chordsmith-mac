@@ -47,6 +47,25 @@ The **Practice** tab turns the recorder's data into drills:
 - **Drills** of five words at a time: chord each word into the field, see your
   time and chords per minute, repeat with the chord hidden, then move on.
 
+## Stats
+
+The **Stats** tab puts every metric in one place for the last 7 days, 30
+days, 90 days or 12 months, following Apple's chart guidelines: each chart
+leads with a one-line summary, hovering anywhere over a chart shows that
+day's values, rates use a fixed 0–100% scale, and every chart describes itself
+to VoiceOver and Audio Graphs.
+
+- Words per day, split into chorded, typed on the M4G and typed on other
+  keyboards, with a table view.
+- Chord rate against library coverage: the gap is chords you have but didn't use.
+- Letter-by-letter speed in WPM on the M4G versus other keyboards.
+- Chords per day or month, typo rate, time spent typing by hand, chords added,
+  backspace correction rate, chord streak, most chorded words, most-typed words
+  without a chord, and language mix.
+
+Chord measures start on the first day the recorder could tell chords from
+typing, so earlier days never read as zero percent chorded.
+
 ## Advisor
 
 The advisor is local and deterministic. It uses:

@@ -517,6 +517,25 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(words.first?.source, .m4gTyping)
     }
 
+    func testUsageRecorderNotesWordsFinishedWithAnAutocompleteKey() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let recorder = TypingRecorder(libraryService: library)
+        let start = Date()
+
+        await recorder.observeKeyboardText("zelv", startedAt: start, endedAt: start.addingTimeInterval(0.8))
+        await recorder.observeCompletionKey(at: start.addingTimeInterval(1.2))
+        await recorder.observeKeyboardText("fine ", startedAt: start.addingTimeInterval(2), endedAt: start.addingTimeInterval(2.4))
+        await recorder.observeCompletionKey(at: start.addingTimeInterval(3))
+
+        let usage = try await library.wordSourceUsage(days: 1)
+        XCTAssertEqual(usage.first { $0.word == "zelv" }?.completedFrequency, 1)
+        // A Tab after a space is not an autocomplete of `fine`.
+        XCTAssertEqual(usage.first { $0.word == "fine" }?.completedFrequency, 0)
+    }
+
     func testSoftwareChordPhraseRecordsIndividualMultilingualWords() async throws {
         let temp = try TemporaryDirectory()
         defer { temp.remove() }

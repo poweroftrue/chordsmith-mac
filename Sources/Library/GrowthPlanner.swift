@@ -32,6 +32,13 @@ public struct GrowthItem: Codable, Hashable, Sendable, Identifiable {
     /// library and against the first candidates of every higher-ranked item,
     /// so accepting a whole batch never produces a collision.
     public let candidates: [Candidate]
+    /// Autocomplete fragments and misspellings counted as this word.
+    public let mergedWords: [String]
+    /// When this word looks like the start of a longer word you finish with
+    /// autocomplete (`zelv` for `zelvora`), that word.
+    public let possibleCompletionOf: String?
+    /// Every fragment that would merge into `possibleCompletionOf`.
+    public let completionFragments: [String]
 
     /// Milliseconds spent typing this word letter by letter in the window.
     public var timeCostMs: Double { Double(frequency) * min(avgMs, GrowthPlanner.avgMsCap) }
@@ -44,8 +51,14 @@ public struct GrowthItem: Codable, Hashable, Sendable, Identifiable {
         category: GrowthCategory,
         baseWord: String?,
         baseChordInput: [String]?,
-        candidates: [Candidate]
+        candidates: [Candidate],
+        mergedWords: [String] = [],
+        possibleCompletionOf: String? = nil,
+        completionFragments: [String] = []
     ) {
+        self.mergedWords = mergedWords
+        self.possibleCompletionOf = possibleCompletionOf
+        self.completionFragments = completionFragments
         self.word = word
         self.frequency = frequency
         self.avgMs = avgMs
@@ -84,6 +97,8 @@ public struct GrowthPlan: Codable, Hashable, Sendable {
     public let skippedWords: [String]
     public let arabicWordCount: Int
     public let arabicOccurrences: Int
+    /// Words you merged into another word, keyed by the merged word.
+    public let aliases: [String: String]
 
     public init(
         windowDays: Int,
@@ -93,8 +108,10 @@ public struct GrowthPlan: Codable, Hashable, Sendable {
         uncoveredWordCount: Int,
         skippedWords: [String],
         arabicWordCount: Int,
-        arabicOccurrences: Int
+        arabicOccurrences: Int,
+        aliases: [String: String] = [:]
     ) {
+        self.aliases = aliases
         self.windowDays = windowDays
         self.items = items
         self.typos = typos
@@ -127,6 +144,10 @@ public struct WordSourceUsage: Hashable, Sendable {
     /// Average milliseconds per letter-by-letter occurrence.
     public let typedAvgMs: Double
     public let lastUsedAt: Date
+    /// Times the typed letters were finished with an autocomplete key.
+    public let completedFrequency: Int
+    /// Words folded into this one (autocomplete fragments, misspellings).
+    public let mergedWords: [String]
 
     public var frequency: Int { typedFrequency + chordedFrequency }
 
@@ -137,8 +158,12 @@ public struct WordSourceUsage: Hashable, Sendable {
         keyboardFrequency: Int,
         chordedFrequency: Int,
         typedAvgMs: Double,
-        lastUsedAt: Date
+        lastUsedAt: Date,
+        completedFrequency: Int = 0,
+        mergedWords: [String] = []
     ) {
+        self.completedFrequency = completedFrequency
+        self.mergedWords = mergedWords
         self.word = word
         self.language = language
         self.typedFrequency = typedFrequency
@@ -187,6 +212,14 @@ public struct GrowthPlanner: Sendable {
             knownFrequency: knownFrequency,
             chordedWords: chordsByWord
         )
+        let completionTargets = Self.completionTargets(usage: usage, dictionary: dictionary)
+        var fragmentsByTarget: [String: [String]] = [:]
+        for (fragment, target) in completionTargets where (knownFrequency[fragment] ?? 0) >= Self.minimumFrequency {
+            fragmentsByTarget[target, default: []].append(fragment)
+        }
+        // Misspellings of a word you have no chord for yet add to that word's
+        // cost: its chord removes the typo too.
+        var typoFolds: [String: (frequency: Int, time: Double, words: [String])] = [:]
 
         var totalTime = 0.0
         var uncoveredTime = 0.0
@@ -215,14 +248,6 @@ public struct GrowthPlanner: Sendable {
             if entry.word.count <= 4, entry.typedAvgMs < Self.fragmentMaxAvgMs {
                 continue
             }
-            // Half-typed words finished by shell or editor completion
-            // (`scre` + Tab) are not words to chord.
-            if !dictionary.contains(entry.word),
-               entry.word.count <= 6,
-               let relative = longerRelativeFrequency[entry.word],
-               relative >= entry.typedFrequency {
-                continue
-            }
             if let intended = Self.intendedWord(
                 forTypo: entry.word,
                 frequency: entry.typedFrequency,
@@ -230,17 +255,33 @@ public struct GrowthPlanner: Sendable {
                 knownFrequency: knownFrequency,
                 dictionary: dictionary
             ) {
-                typos.append(
-                    TypoFinding(
-                        typo: entry.word,
-                        intended: intended,
-                        frequency: entry.typedFrequency,
-                        intendedChordInput: chordsByWord[intended]?.first.map(Self.displayInput)
+                if chordsByWord[intended] == nil {
+                    var fold = typoFolds[intended] ?? (0, 0, [])
+                    fold.frequency += entry.typedFrequency
+                    fold.time += time
+                    fold.words.append(entry.word)
+                    typoFolds[intended] = fold
+                } else {
+                    typos.append(
+                        TypoFinding(
+                            typo: entry.word,
+                            intended: intended,
+                            frequency: entry.typedFrequency,
+                            intendedChordInput: chordsByWord[intended]?.first.map(Self.displayInput)
+                        )
                     )
-                )
+                }
                 continue
             }
 
+            // After typo folding: half-typed words finished by shell or editor completion
+            // (`scre` + Tab) are not words to chord.
+            if !dictionary.contains(entry.word),
+               entry.word.count <= 6,
+               let relative = longerRelativeFrequency[entry.word],
+               relative >= entry.typedFrequency {
+                continue
+            }
             if let base = chordedBase(for: entry.word, chordsByWord: chordsByWord) {
                 pool.append((entry, .ending, base))
             } else {
@@ -248,6 +289,10 @@ public struct GrowthPlanner: Sendable {
             }
         }
 
+        pool = pool.map { entry in
+            guard let fold = typoFolds[entry.usage.word] else { return entry }
+            return (Self.adding(fold, to: entry.usage), entry.category, entry.base)
+        }
         pool.sort { lhs, rhs in
             let lhsCost = Double(lhs.usage.typedFrequency) * min(lhs.usage.typedAvgMs, Self.avgMsCap)
             let rhsCost = Double(rhs.usage.typedFrequency) * min(rhs.usage.typedAvgMs, Self.avgMsCap)
@@ -281,6 +326,11 @@ public struct GrowthPlanner: Sendable {
             // Only call it an ending when the chord really is the base chord
             // plus a marker; otherwise there is no family to lean on.
             let extendsBase = best.softReasons.contains { $0.hasPrefix("Extends ") }
+            // Suggest merging into custom vocabulary (names, products), or
+            // into any word once autocomplete has been seen finishing it.
+            let suggestedCompletion = completionTargets[entry.usage.word].flatMap { target in
+                !dictionary.contains(target) || entry.usage.completedFrequency > 0 ? target : nil
+            }
             let category: GrowthCategory = entry.category == .ending && extendsBase ? .ending : .word
             items.append(
                 GrowthItem(
@@ -293,7 +343,12 @@ public struct GrowthPlanner: Sendable {
                     baseChordInput: category == .ending
                         ? entry.base.flatMap { chordsByWord[$0]?.first }.map(Self.displayInput)
                         : nil,
-                    candidates: candidates
+                    candidates: candidates,
+                    mergedWords: entry.usage.mergedWords,
+                    possibleCompletionOf: suggestedCompletion,
+                    completionFragments: suggestedCompletion
+                        .flatMap { fragmentsByTarget[$0] }?
+                        .sorted { (knownFrequency[$0] ?? 0) > (knownFrequency[$1] ?? 0) } ?? []
                 )
             )
         }
@@ -308,6 +363,143 @@ public struct GrowthPlanner: Sendable {
             skippedWords: skippedWords.sorted(),
             arabicWordCount: arabicWords,
             arabicOccurrences: arabicOccurrences
+        )
+    }
+
+    // MARK: Folding fragments and misspellings
+
+    /// For each non-dictionary word that is the start of a longer word you
+    /// use, the word it most likely completes to. Chains resolve, so `zel`
+    /// (start of `zelv`, itself the start of `zelvora`) maps to `zelvora`.
+    public static func completionTargets(usage: [WordSourceUsage], dictionary: Set<String>) -> [String: String] {
+        let frequency = Dictionary(usage.map { ($0.word, $0.frequency) }, uniquingKeysWith: +)
+        var bestByPrefix: [String: (word: String, frequency: Int)] = [:]
+        for (word, count) in frequency where count >= minimumFrequency && word.count >= 4 {
+            let letters = Array(word)
+            // At least two letters must be missing: one extra letter is a
+            // plural or a misspelling (`topups`, `slopmetere`), not autocomplete.
+            guard letters.count >= 5 else { continue }
+            for length in 3...(letters.count - 2) {
+                let prefix = String(letters.prefix(length))
+                if let best = bestByPrefix[prefix],
+                   best.frequency > count || (best.frequency == count && best.word < word) {
+                    continue
+                }
+                bestByPrefix[prefix] = (word, count)
+            }
+        }
+
+        var result: [String: String] = [:]
+        for word in frequency.keys where word.count >= 3 && !dictionary.contains(word) {
+            guard var target = bestByPrefix[word]?.word else { continue }
+            var seen: Set<String> = [word, target]
+            while !dictionary.contains(target),
+                  let next = bestByPrefix[target]?.word,
+                  seen.insert(next).inserted {
+                target = next
+            }
+            result[word] = target
+        }
+        return result
+    }
+
+    /// Folds words into the word they stand for: explicit aliases you set,
+    /// plus fragments you finished with an autocomplete key at least half the
+    /// time. Counts, timing and chord use are combined.
+    public static func fold(
+        _ usage: [WordSourceUsage],
+        aliases: [String: String],
+        dictionary: Set<String>
+    ) -> [WordSourceUsage] {
+        var merges = aliases
+        let targets = completionTargets(usage: usage, dictionary: dictionary)
+        for entry in usage where merges[entry.word] == nil
+            && entry.completedFrequency >= minimumFrequency
+            && entry.completedFrequency * 2 >= entry.typedFrequency {
+            if let target = targets[entry.word] {
+                merges[entry.word] = target
+            }
+        }
+        guard !merges.isEmpty else { return usage }
+
+        func resolve(_ word: String) -> String {
+            var current = word
+            var seen: Set<String> = [word]
+            while let next = merges[current], seen.insert(next).inserted {
+                current = next
+            }
+            return current
+        }
+
+        struct Accumulator {
+            var language: WordLanguage
+            var typed = 0
+            var keyboard = 0
+            var chorded = 0
+            var completed = 0
+            var typedTime = 0.0
+            var lastUsed = Date.distantPast
+            var merged: [String] = []
+            var hasOwnEntry = false
+        }
+        var byWord: [String: Accumulator] = [:]
+        var order: [String] = []
+        for entry in usage {
+            let target = resolve(entry.word)
+            if byWord[target] == nil {
+                byWord[target] = Accumulator(language: entry.language)
+                order.append(target)
+            }
+            var accumulator = byWord[target]!
+            if entry.word == target {
+                accumulator.language = entry.language
+                accumulator.hasOwnEntry = true
+            } else {
+                accumulator.merged.append(entry.word)
+            }
+            accumulator.typed += entry.typedFrequency
+            accumulator.keyboard += entry.keyboardFrequency
+            accumulator.chorded += entry.chordedFrequency
+            accumulator.completed += entry.completedFrequency
+            accumulator.typedTime += entry.typedAvgMs * Double(entry.typedFrequency)
+            accumulator.lastUsed = max(accumulator.lastUsed, entry.lastUsedAt)
+            accumulator.merged.append(contentsOf: entry.mergedWords)
+            byWord[target] = accumulator
+        }
+
+        return order.compactMap { word in
+            guard let entry = byWord[word] else { return nil }
+            return WordSourceUsage(
+                word: word,
+                language: entry.language,
+                typedFrequency: entry.typed,
+                keyboardFrequency: entry.keyboard,
+                chordedFrequency: entry.chorded,
+                typedAvgMs: entry.typed > 0 ? entry.typedTime / Double(entry.typed) : 0,
+                lastUsedAt: entry.lastUsed,
+                completedFrequency: entry.completed,
+                mergedWords: entry.merged.sorted()
+            )
+        }
+        .sorted { $0.frequency == $1.frequency ? $0.word < $1.word : $0.frequency > $1.frequency }
+    }
+
+    private static func adding(
+        _ fold: (frequency: Int, time: Double, words: [String]),
+        to usage: WordSourceUsage
+    ) -> WordSourceUsage {
+        let typed = usage.typedFrequency + fold.frequency
+        let time = usage.typedAvgMs * Double(usage.typedFrequency) + fold.time
+        return WordSourceUsage(
+            word: usage.word,
+            language: usage.language,
+            typedFrequency: typed,
+            keyboardFrequency: usage.keyboardFrequency + fold.frequency,
+            chordedFrequency: usage.chordedFrequency,
+            typedAvgMs: typed > 0 ? time / Double(typed) : usage.typedAvgMs,
+            lastUsedAt: usage.lastUsedAt,
+            completedFrequency: usage.completedFrequency,
+            mergedWords: (usage.mergedWords + fold.words).sorted()
         )
     }
 
@@ -338,7 +530,7 @@ public struct GrowthPlanner: Sendable {
             if chordedWords[candidate] != nil {
                 return candidateFrequency >= frequency * 2
             }
-            return candidateFrequency >= max(frequency * 5, 10)
+            return candidateFrequency >= max(frequency * 3, 10)
         }
 
         let letters = Array(word)

@@ -302,7 +302,7 @@ struct RootView: View {
                     .tabItem { Label("Practice", systemImage: "target") }
                     .tag(PanelTab.practice)
                 usageTab
-                    .tabItem { Label("Usage", systemImage: "chart.bar.xaxis") }
+                    .tabItem { Label("Stats", systemImage: "chart.bar.xaxis") }
                     .tag(PanelTab.usage)
             }
             .padding(12)
@@ -684,36 +684,16 @@ struct RootView: View {
     }
 
     private var usageTab: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Label(
-                        model.inputObserver.isRunning ? "Recorder running" : "Recorder paused",
-                        systemImage: model.inputObserver.isRunning ? "record.circle" : "pause.circle"
-                    )
-                    .foregroundStyle(model.inputObserver.isRunning ? .green : .secondary)
-                    Text(model.inputObserver.attributionStatusText)
-                        .foregroundStyle(.secondary)
-                    if model.inputObserver.isRunning {
-                        Text("This session: \(model.inputObserver.m4gAttributedKeyCount) keys from the M4G · \(model.inputObserver.otherKeyboardKeyCount) from other keyboards")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Spacer()
-                if model.inputObserver.needsInputMonitoringPermission {
-                    Button("Input Monitoring…") {
-                        model.openInputMonitoringSettings()
-                    }
-                }
-                Button(model.inputObserver.isRunning ? "Pause" : "Resume") {
-                    model.toggleInputObservation()
-                }
-                Button("Refresh") {
-                    Task { await model.loadUsageReport() }
-                }
-            }
-            .font(.caption)
+        StatsTabView(model: model) {
+            usageDetails
+        }
+        .onAppear {
+            Task { await model.loadUsageReport() }
+        }
+    }
 
+    private var usageDetails: some View {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 Picker(
                     "Language",
@@ -747,17 +727,6 @@ struct RootView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
-                GridRow {
-                    usageMetric("Today", words: model.usageOverview.wordsToday, chords: model.usageOverview.chordsToday)
-                    usageMetric("7 days", words: model.usageOverview.words7Days, chords: model.usageOverview.chords7Days)
-                }
-                GridRow {
-                    usageMetric("30 days", words: model.usageOverview.words30Days, chords: model.usageOverview.chords30Days)
-                    usageMetric("All time", words: model.usageOverview.wordsAllTime, chords: model.usageOverview.chordsAllTime)
-                }
-            }
-
             HStack(spacing: 8) {
                 coverageMetric(
                     "Chord coverage",
@@ -776,118 +745,99 @@ struct RootView: View {
                 )
             }
 
-            List {
-                Section {
-                    if model.wordCoverageReport.uncoveredWords.isEmpty {
-                        Text("No uncovered words in this filter.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(model.wordCoverageReport.uncoveredWords.prefix(15)) { usage in
-                            coverageWordRow(usage)
-                        }
-                    }
-                } header: {
-                    HStack {
-                        Text("Most used without an M4G chord")
-                        Spacer()
-                        Button("Plan chords in Grow") {
-                            model.selectedTab = .grow
-                        }
-                        .buttonStyle(.link)
-                        .font(.caption)
+            DetailSection {
+                if model.wordCoverageReport.uncoveredWords.isEmpty {
+                    Text("No uncovered words in this filter.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.wordCoverageReport.uncoveredWords.prefix(15)) { usage in
+                        coverageWordRow(usage)
                     }
                 }
-
-                Section("Most used with an M4G chord") {
-                    if model.wordCoverageReport.coveredWords.isEmpty {
-                        Text("No covered words in this filter.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(model.wordCoverageReport.coveredWords.prefix(15)) { usage in
-                            coverageWordRow(usage)
-                        }
+            } header: {
+                HStack {
+                    Text("Most used without an M4G chord")
+                    Spacer()
+                    Button("Plan chords in Grow") {
+                        model.selectedTab = .grow
                     }
+                    .buttonStyle(.link)
+                    .font(.caption)
                 }
+            }
 
-                Section("Two-key impact") {
-                    if model.twoKeyChordImpact.isEmpty {
-                        Text("No two-key usage recorded yet.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(model.twoKeyChordImpact.prefix(12)) { impact in
-                            HStack(alignment: .top, spacing: 10) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(impact.chord.output)
-                                        .font(.headline)
-                                    ActionTokenRow(tokens: impact.chord.displayInput.isEmpty ? impact.chord.inputKeys : impact.chord.displayInput)
-                                    Text(usageDetail(
-                                        total: impact.totalFrequency,
-                                        seven: impact.frequency7Days,
-                                        thirty: impact.frequency30Days,
-                                        confidence: impact.confidence,
-                                        ambiguity: impact.ambiguityCount
-                                    ))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Text("\(impact.totalFrequency)")
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.vertical, 3)
-                        }
-                    }
-                }
-
-                Section("Recent chords") {
-                    if model.recentChordUsage.isEmpty {
-                        Text("No chord usage recorded yet.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(model.recentChordUsage.prefix(10)) { usage in
-                            usageRow(
-                                title: usage.output,
-                                subtitle: "\(usage.source.displayName) • \(usage.confidence.displayName) • \(usage.day)",
-                                frequency: usage.frequency
-                            )
-                        }
-                    }
-                }
-
-                Section("Recent words") {
-                    if model.recentWordUsage.isEmpty {
-                        Text("No word usage recorded yet.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(model.recentWordUsage.prefix(10)) { usage in
-                            usageRow(
-                                title: usage.word,
-                                subtitle: "\(usage.language.displayName) • \(usage.source.displayName) • \(usage.day)",
-                                frequency: usage.frequency
-                            )
-                        }
+            DetailSection(title: "Most used with an M4G chord") {
+                if model.wordCoverageReport.coveredWords.isEmpty {
+                    Text("No covered words in this filter.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.wordCoverageReport.coveredWords.prefix(15)) { usage in
+                        coverageWordRow(usage)
                     }
                 }
             }
-            .listStyle(.plain)
-        }
-        .onAppear {
-            Task { await model.loadUsageReport() }
-        }
-    }
 
-    private func usageMetric(_ title: String, words: Int, chords: Int) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-            Text("\(words) words")
-            Text("\(chords) chords")
+            DetailSection(title: "Two-key impact") {
+                if model.twoKeyChordImpact.isEmpty {
+                    Text("No two-key usage recorded yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.twoKeyChordImpact.prefix(12)) { impact in
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(impact.chord.output)
+                                    .font(.headline)
+                                ActionTokenRow(tokens: impact.chord.displayInput.isEmpty ? impact.chord.inputKeys : impact.chord.displayInput)
+                                Text(usageDetail(
+                                    total: impact.totalFrequency,
+                                    seven: impact.frequency7Days,
+                                    thirty: impact.frequency30Days,
+                                    confidence: impact.confidence,
+                                    ambiguity: impact.ambiguityCount
+                                ))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text("\(impact.totalFrequency)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 3)
+                    }
+                }
+            }
+
+            DetailSection(title: "Recent chords") {
+                if model.recentChordUsage.isEmpty {
+                    Text("No chord usage recorded yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.recentChordUsage.prefix(10)) { usage in
+                        usageRow(
+                            title: usage.output,
+                            subtitle: "\(usage.source.displayName) • \(usage.confidence.displayName) • \(usage.day)",
+                            frequency: usage.frequency
+                        )
+                    }
+                }
+            }
+
+            DetailSection(title: "Recent words") {
+                if model.recentWordUsage.isEmpty {
+                    Text("No word usage recorded yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.recentWordUsage.prefix(10)) { usage in
+                        usageRow(
+                            title: usage.word,
+                            subtitle: "\(usage.language.displayName) • \(usage.source.displayName) • \(usage.day)",
+                            frequency: usage.frequency
+                        )
+                    }
+                }
+            }
         }
-        .font(.caption)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(8)
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
     }
 
     private func coverageMetric(_ title: String, value: String, detail: String) -> some View {
@@ -1307,3 +1257,33 @@ struct SettingsView: View {
         .padding(16)
     }
 }
+
+/// A titled group for the stats details disclosure, laid out like a list
+/// section but usable inside a scroll view.
+struct DetailSection<Content: View, Header: View>: View {
+    @ViewBuilder let content: () -> Content
+    @ViewBuilder let header: () -> Header
+
+    init(@ViewBuilder content: @escaping () -> Content, @ViewBuilder header: @escaping () -> Header) {
+        self.content = content
+        self.header = header
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            header()
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
+            Divider()
+        }
+    }
+}
+
+extension DetailSection where Header == Text {
+    init(title: String, @ViewBuilder content: @escaping () -> Content) {
+        self.content = content
+        self.header = { Text(title) }
+    }
+}
+

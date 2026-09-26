@@ -24,6 +24,9 @@ public actor UsageRecorder {
     private var pendingWord: PendingWord?
     private var deviceChordsByOutput: [String: [ChordEntry]] = [:]
     private var idleFlushTask: Task<Void, Never>?
+    /// Counts for the correction rate, written at word boundaries.
+    private var pendingKeystrokes = 0
+    private var pendingBackspaces = 0
 
     private let newWordThreshold: TimeInterval = 5.0
     /// Upper bound for the gap between characters of one chord output.
@@ -56,6 +59,7 @@ public actor UsageRecorder {
     ) async {
         guard !text.isEmpty else { return }
         let characters = Array(text)
+        pendingKeystrokes += characters.count
         let step = endedAt.timeIntervalSince(startedAt) / Double(max(characters.count, 1))
 
         for (index, character) in characters.enumerated() {
@@ -88,6 +92,7 @@ public actor UsageRecorder {
     }
 
     public func observeBackspace() {
+        pendingBackspaces += 1
         if !buffer.isEmpty {
             buffer.removeLast()
         } else if var pending = pendingWord {
@@ -110,6 +115,7 @@ public actor UsageRecorder {
     /// Option+Backspace: the word being typed, or the word just finished, is
     /// gone and must not be counted.
     public func observeDeleteWord() {
+        pendingBackspaces += 1
         if !buffer.isEmpty {
             buffer.removeAll()
         } else {
@@ -119,6 +125,7 @@ public actor UsageRecorder {
 
     /// Command+Backspace: everything uncommitted on the line is gone.
     public func observeDeleteLine() {
+        pendingBackspaces += 1
         buffer.removeAll()
         pendingWord = nil
         idleFlushTask?.cancel()
@@ -131,6 +138,23 @@ public actor UsageRecorder {
     public func observeDelimiter(at timestamp: Date = .now) async {
         await finishWord(endedAt: timestamp)
         await commitPendingWord()
+        let keystrokes = pendingKeystrokes
+        let backspaces = pendingBackspaces
+        pendingKeystrokes = 0
+        pendingBackspaces = 0
+        try? await libraryService.recordKeyStats(keystrokes: keystrokes, backspaces: backspaces, at: timestamp)
+    }
+
+    /// Tab or Right Arrow straight after letters usually accepts an
+    /// autocomplete suggestion (Slack mentions, shell completion, inline
+    /// predictions). The inserted text never reaches the recorder, so note
+    /// that these letters were only the start of the real word.
+    public func observeCompletionKey(at timestamp: Date = .now) async {
+        let typed = MultilingualWordProcessor.words(in: String(buffer.map(\.character)))
+        await observeDelimiter(at: timestamp)
+        if typed.count == 1, let word = typed.first?.text {
+            try? await libraryService.recordCompletedWord(word, lastUsedAt: timestamp)
+        }
     }
 
     public func recordLiteralText(_ text: String, startedAt: Date, endedAt: Date) async {

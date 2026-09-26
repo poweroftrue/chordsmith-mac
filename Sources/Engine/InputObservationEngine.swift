@@ -21,6 +21,7 @@ public final class InputObservationEngine: ObservableObject {
         case deleteWord
         case deleteLine
         case delimiter(Date)
+        case completionKey(Date)
     }
 
     private enum ResolvedRecorderEvent: Sendable {
@@ -29,6 +30,7 @@ public final class InputObservationEngine: ObservableObject {
         case deleteWord
         case deleteLine
         case delimiter(Date)
+        case completionKey(Date)
         case flush
     }
 
@@ -151,8 +153,11 @@ public final class InputObservationEngine: ObservableObject {
                 enqueue(.backspace)
             }
             return Unmanaged.passUnretained(event)
-        case kVK_ForwardDelete, kVK_Return, kVK_ANSI_KeypadEnter, kVK_Tab, kVK_Escape,
-             kVK_LeftArrow, kVK_RightArrow, kVK_UpArrow, kVK_DownArrow,
+        case kVK_Tab, kVK_RightArrow:
+            enqueue(.completionKey(.now))
+            return Unmanaged.passUnretained(event)
+        case kVK_ForwardDelete, kVK_Return, kVK_ANSI_KeypadEnter, kVK_Escape,
+             kVK_LeftArrow, kVK_UpArrow, kVK_DownArrow,
              kVK_Home, kVK_End, kVK_PageUp, kVK_PageDown:
             enqueue(.delimiter(.now))
             return Unmanaged.passUnretained(event)
@@ -222,6 +227,8 @@ public final class InputObservationEngine: ObservableObject {
                 return .deleteLine
             case .delimiter(let timestamp):
                 return .delimiter(timestamp)
+            case .completionKey(let timestamp):
+                return .completionKey(timestamp)
             }
         }
         if m4gKeys > 0 { m4gAttributedKeyCount += m4gKeys }
@@ -253,6 +260,8 @@ public final class InputObservationEngine: ObservableObject {
                     await recorder.observeDeleteLine()
                 case .delimiter(let timestamp):
                     await recorder.observeDelimiter(at: timestamp)
+                case .completionKey(let timestamp):
+                    await recorder.observeCompletionKey(at: timestamp)
                 case .flush:
                     await recorder.flush()
                 }

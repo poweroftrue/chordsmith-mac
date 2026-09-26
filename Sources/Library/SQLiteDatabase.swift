@@ -317,6 +317,41 @@ final class SQLiteDatabase {
             )
             """
         )
+        // How often a typed word was finished by an autocomplete key (Tab,
+        // Right Arrow). The completed text never reaches the recorder, so this
+        // is the evidence that `zelv` was really `zelvora`.
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_completion_stats (
+                day TEXT NOT NULL,
+                word TEXT NOT NULL,
+                frequency INTEGER NOT NULL,
+                PRIMARY KEY (day, word)
+            )
+            """
+        )
+        // Words that should be counted as another word: autocomplete
+        // fragments and personal misspellings folded into the real word.
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS word_aliases (
+                word TEXT PRIMARY KEY,
+                target TEXT NOT NULL,
+                source TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+            """
+        )
+        // Keystroke and backspace counts per day, for the correction rate.
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_key_stats (
+                day TEXT PRIMARY KEY,
+                keystrokes INTEGER NOT NULL,
+                backspaces INTEGER NOT NULL
+            )
+            """
+        )
         try migrateMultilingualWordsIfNeeded()
     }
 

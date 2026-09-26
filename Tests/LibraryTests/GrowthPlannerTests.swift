@@ -134,6 +134,95 @@ final class GrowthPlannerTests: XCTestCase {
         XCTAssertEqual(plan.arabicOccurrences, 12)
     }
 
+    private func usage(_ word: String, typed: Int, avgMs: Double = 800, completed: Int) -> WordSourceUsage {
+        WordSourceUsage(
+            word: word,
+            language: .english,
+            typedFrequency: typed,
+            keyboardFrequency: typed,
+            chordedFrequency: 0,
+            typedAvgMs: avgMs,
+            lastUsedAt: Date(timeIntervalSince1970: 1_000),
+            completedFrequency: completed
+        )
+    }
+
+    func testCompletionTargetsFollowChainsToTheFullWord() {
+        let targets = GrowthPlanner.completionTargets(
+            usage: [usage("zel", typed: 86), usage("zelv", typed: 101), usage("zelvora", typed: 54), usage("zelvo", typed: 17)],
+            dictionary: []
+        )
+        XCTAssertEqual(targets["zel"], "zelvora")
+        XCTAssertEqual(targets["zelv"], "zelvora")
+        XCTAssertEqual(targets["zelvo"], "zelvora")
+        XCTAssertNil(targets["zelvora"])
+    }
+
+    func testFoldMergesAliasesAndAutocompletedFragments() {
+        let folded = GrowthPlanner.fold(
+            [
+                usage("zelvora", typed: 54, avgMs: 1_800),
+                usage("zelv", typed: 100, avgMs: 1_300),
+                usage("zel", typed: 10, avgMs: 1_200, completed: 8),
+                usage("mini", typed: 70, avgMs: 900),
+                usage("minimum", typed: 5, avgMs: 900)
+            ],
+            aliases: ["zelv": "zelvora"],
+            dictionary: ["minimum"]
+        )
+
+        let zelvora = try? XCTUnwrap(folded.first { $0.word == "zelvora" })
+        XCTAssertEqual(zelvora?.typedFrequency, 164)
+        XCTAssertEqual(zelvora?.mergedWords, ["zel", "zelv"])
+        XCTAssertEqual(zelvora?.completedFrequency, 8)
+        XCTAssertFalse(folded.contains { $0.word == "zelv" || $0.word == "zel" })
+        // No alias and no autocomplete evidence: `mini` stays a word.
+        XCTAssertTrue(folded.contains { $0.word == "mini" })
+    }
+
+    func testPlanSuggestsMergingAFragmentAndFoldsMisspellingsOfUnchordedWords() {
+        let plan = GrowthPlanner().plan(
+            usage: [
+                usage("zelv", typed: 101, avgMs: 1_300),
+                usage("zelvora", typed: 54, avgMs: 1_800),
+                usage("elvora", typed: 13, avgMs: 1_300)
+            ],
+            profile: .cc2A1,
+            existingChords: [],
+            bannedInputs: [],
+            skippedWords: [],
+            windowDays: 30,
+            limit: 10
+        )
+
+        let zelv = try? XCTUnwrap(plan.items.first { $0.word == "zelv" })
+        XCTAssertEqual(zelv?.possibleCompletionOf, "zelvora")
+        let zelvora = try? XCTUnwrap(plan.items.first { $0.word == "zelvora" })
+        XCTAssertEqual(zelvora?.frequency, 67)
+        XCTAssertEqual(zelvora?.mergedWords, ["elvora"])
+        XCTAssertFalse(plan.items.contains { $0.word == "elvora" })
+    }
+
+    func testWordAliasesPersistAndCompletionKeysAreCounted() async throws {
+        let temp = try PlannerTemporaryDirectory()
+        defer { temp.remove() }
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+
+        try await library.setWordAlias(["Zelv", "zel"], target: "Zelvora")
+        let aliases = try await library.wordAliases()
+        XCTAssertEqual(aliases, ["zelv": "zelvora", "zel": "zelvora"])
+
+        try await library.recordWordUsage(word: "zelv", avgMs: 1_300, source: .keyboard, frequencyDelta: 4)
+        try await library.recordCompletedWord("zelv")
+        try await library.recordCompletedWord("zelv")
+        let usage = try await library.wordSourceUsage(days: 1)
+        XCTAssertEqual(usage.first { $0.word == "zelv" }?.completedFrequency, 2)
+
+        try await library.setWordAlias(["zel"], target: nil)
+        let remaining = try await library.wordAliases()
+        XCTAssertEqual(remaining, ["zelv": "zelvora"])
+    }
+
     func testCommaKeyIsKeptWhenPlusSeparatesTokens() {
         XCTAssertEqual(ChordInputValidator.tokens(from: ",+g+o"), [",", "g", "o"])
         XCTAssertEqual(ChordInputValidator.tokens(from: "t,h,e"), ["t", "h", "e"])

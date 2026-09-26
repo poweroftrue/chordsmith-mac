@@ -127,6 +127,9 @@ final class AppModel: ObservableObject {
     @Published var growthSelection: Set<String> = []
     @Published var growthWindowDays = 30
     @Published private(set) var practiceReport = PracticeReport.empty
+    @Published var statsPeriod: StatsPeriod = .month
+    @Published private(set) var statsReport = StatsReport.empty(.month)
+    @Published private(set) var isLoadingStats = false
     @Published private(set) var hasLoadedPracticeReport = false
 
     /// Opens the panel in a standalone window; set by the app delegate.
@@ -739,8 +742,52 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Counts `words` as `target` everywhere in Grow and Practice.
+    func mergeWords(_ words: [String], into target: String) async {
+        let cleaned = words
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty && $0 != target.lowercased() }
+        guard !cleaned.isEmpty, !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        do {
+            try await libraryService.setWordAlias(cleaned, target: target)
+            growthSelection.subtract(cleaned)
+            statusText = "Counting \(cleaned.joined(separator: ", ")) as \(target)"
+            await refreshGrowthViewsIfLoaded()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func unmergeWord(_ word: String) async {
+        do {
+            try await libraryService.setWordAlias([word], target: nil)
+            statusText = "\(word) counts as its own word again"
+            await refreshGrowthViewsIfLoaded()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
     func stagedOutputs() -> Set<String> {
         Set(stagedChanges.filter { $0.kind == .upsert }.map { ($0.chord.plainOutput ?? $0.chord.output).lowercased() })
+    }
+
+    // MARK: Stats
+
+    func loadStats() async {
+        let period = statsPeriod
+        isLoadingStats = true
+        defer { isLoadingStats = false }
+        do {
+            let report = try await libraryService.statsReport(period: period)
+            // Ignore a stale result if the period changed meanwhile.
+            if period == statsPeriod {
+                statsReport = report
+            }
+        } catch {
+            lastError = error.localizedDescription
+            statusText = "Could not build stats"
+        }
     }
 
     // MARK: Practice

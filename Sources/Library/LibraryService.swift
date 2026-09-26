@@ -5,6 +5,8 @@ public actor LibraryService {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let suggestionEngine: SuggestionEngine
+    /// The typo scan covers every word ever typed; it changes slowly.
+    private var typoWordCache: (computedAt: Date, words: Set<String>)?
     private static let chordColumns = """
         id, input_keys_json, normalized_input, output, profile, deployment_target, source, enabled,
         raw_input, raw_output, raw_input_actions_json, raw_phrase_actions_json,
@@ -1424,6 +1426,22 @@ extension LibraryService {
             byWord[word] = entry
         }
 
+        let completionRows = try database.query(
+            """
+            SELECT word, SUM(frequency) AS frequency
+            FROM daily_completion_stats
+            \(days == nil ? "" : "WHERE day >= ?")
+            GROUP BY word
+            """,
+            bindings: days == nil ? [] : [bindings[1]]
+        )
+        var completed: [String: Int] = [:]
+        for row in completionRows {
+            if let word = row.string("word"), let frequency = row.integer("frequency") {
+                completed[word] = Int(frequency)
+            }
+        }
+
         return byWord.map { word, entry in
             let total = entry.typed + entry.chorded
             let typedAvg = entry.typed > 0
@@ -1436,7 +1454,8 @@ extension LibraryService {
                 keyboardFrequency: entry.keyboard,
                 chordedFrequency: entry.chorded,
                 typedAvgMs: typedAvg,
-                lastUsedAt: Date(timeIntervalSince1970: entry.lastUsed)
+                lastUsedAt: Date(timeIntervalSince1970: entry.lastUsed),
+                completedFrequency: completed[word] ?? 0
             )
         }
         .sorted { $0.frequency == $1.frequency ? $0.word < $1.word : $0.frequency > $1.frequency }
@@ -1457,16 +1476,73 @@ extension LibraryService {
         default:
             existingChords = try activeChords(for: profile)
         }
-        return GrowthPlanner(engine: suggestionEngine).plan(
-            usage: try wordSourceUsage(days: days, now: now),
+        let dictionary = GrowthPlanner.loadSystemDictionary()
+        let aliases = try wordAliases()
+        let plan = GrowthPlanner(engine: suggestionEngine).plan(
+            usage: GrowthPlanner.fold(try wordSourceUsage(days: days, now: now), aliases: aliases, dictionary: dictionary),
             profile: profile,
             existingChords: existingChords,
             bannedInputs: try bannedInputs(),
             skippedWords: try skippedGrowthWords(),
-            dictionary: GrowthPlanner.loadSystemDictionary(),
+            dictionary: dictionary,
             windowDays: days,
             limit: limit
         )
+        return GrowthPlan(
+            windowDays: plan.windowDays,
+            items: plan.items,
+            typos: plan.typos,
+            uncoveredTimeShare: plan.uncoveredTimeShare,
+            uncoveredWordCount: plan.uncoveredWordCount,
+            skippedWords: plan.skippedWords,
+            arabicWordCount: plan.arabicWordCount,
+            arabicOccurrences: plan.arabicOccurrences,
+            aliases: aliases
+        )
+    }
+
+    /// Records that the letters of `word` were finished by an autocomplete
+    /// key, so the recorder only saw the start of the real word.
+    public func recordCompletedWord(_ word: String, lastUsedAt: Date = .now) throws {
+        guard let processed = MultilingualWordProcessor.normalize(word) else { return }
+        try database.execute(
+            """
+            INSERT INTO daily_completion_stats (day, word, frequency)
+            VALUES (?, ?, 1)
+            ON CONFLICT(day, word) DO UPDATE SET frequency = frequency + 1
+            """,
+            bindings: [.text(usageDay(for: lastUsedAt)), .text(processed.text)]
+        )
+    }
+
+    public func wordAliases() throws -> [String: String] {
+        let rows = try database.query("SELECT word, target FROM word_aliases")
+        var aliases: [String: String] = [:]
+        for row in rows {
+            if let word = row.string("word"), let target = row.string("target") {
+                aliases[word] = target
+            }
+        }
+        return aliases
+    }
+
+    /// Counts `words` as `target` from now on in Grow and Practice. Pass nil
+    /// to undo.
+    public func setWordAlias(_ words: [String], target: String?, source: String = "user") throws {
+        try database.transaction {
+            for word in words {
+                guard let normalized = MultilingualWordProcessor.normalize(word)?.text else { continue }
+                if let target, let normalizedTarget = MultilingualWordProcessor.normalize(target)?.text,
+                   normalizedTarget != normalized {
+                    try database.execute(
+                        "INSERT OR REPLACE INTO word_aliases (word, target, source, created_at) VALUES (?, ?, ?, ?)",
+                        bindings: [.text(normalized), .text(normalizedTarget), .text(source), .double(Date().timeIntervalSince1970)]
+                    )
+                } else {
+                    try database.execute("DELETE FROM word_aliases WHERE word = ?", bindings: [.text(normalized)])
+                }
+            }
+        }
     }
 
     public func skippedGrowthWords() throws -> Set<String> {
@@ -1519,11 +1595,11 @@ extension LibraryService {
         learningDays: Int = 30,
         now: Date = .now
     ) throws -> PracticeReport {
-        let usage = try wordSourceUsage(days: days, now: now)
+        let dictionary = GrowthPlanner.loadSystemDictionary()
+        let usage = GrowthPlanner.fold(try wordSourceUsage(days: days, now: now), aliases: try wordAliases(), dictionary: dictionary)
         let chords = try deviceChords()
         let chordsByWord = GrowthPlanner.chordsByOutputWord(chords)
         let knownFrequency = Dictionary(usage.map { ($0.word, $0.frequency) }, uniquingKeysWith: +)
-        let dictionary = GrowthPlanner.loadSystemDictionary()
 
         var forgotten: [ForgottenChord] = []
         var typos: [TypoFinding] = []
@@ -1619,3 +1695,122 @@ extension LibraryService {
         )
     }
 }
+
+// MARK: - Stats
+
+extension LibraryService {
+    public func recordKeyStats(keystrokes: Int, backspaces: Int, at date: Date = .now) throws {
+        guard keystrokes > 0 || backspaces > 0 else { return }
+        try database.execute(
+            """
+            INSERT INTO daily_key_stats (day, keystrokes, backspaces)
+            VALUES (?, ?, ?)
+            ON CONFLICT(day) DO UPDATE SET
+                keystrokes = keystrokes + excluded.keystrokes,
+                backspaces = backspaces + excluded.backspaces
+            """,
+            bindings: [.text(usageDay(for: date)), .integer(Int64(keystrokes)), .integer(Int64(backspaces))]
+        )
+    }
+
+    /// Everything the Stats tab shows for one period, plus the period before
+    /// it for comparison.
+    public func statsReport(period: StatsPeriod, now: Date = .now) throws -> StatsReport {
+        let builder = StatsBuilder(period: period, now: now)
+        let startDay = usageDay(for: builder.previousStart)
+
+        let wordRows = try database.query(
+            """
+            SELECT day, word, source, language,
+                   SUM(frequency) AS frequency,
+                   SUM(avg_ms * frequency) / SUM(frequency) AS avg_ms
+            FROM daily_word_stats
+            WHERE day >= ?
+            GROUP BY day, word, source, language
+            """,
+            bindings: [.text(startDay)]
+        ).compactMap { row -> DailyWordRow? in
+            guard let day = row.string("day"),
+                  let word = row.string("word"),
+                  let source = row.string("source").flatMap(UsageSource.init(rawValue:)),
+                  let frequency = row.integer("frequency"),
+                  let avgMs = row.double("avg_ms") else { return nil }
+            return DailyWordRow(
+                day: day,
+                word: word,
+                source: source,
+                language: WordLanguage(rawValue: row.string("language") ?? "") ?? .other,
+                frequency: Int(frequency),
+                avgMs: avgMs
+            )
+        }
+
+        let chordRows = try database.query(
+            """
+            SELECT day, SUM(frequency) AS frequency
+            FROM daily_chord_stats
+            WHERE day >= ? AND source != ?
+            GROUP BY day
+            """,
+            bindings: [.text(startDay), .text(UsageSource.nexusImport.rawValue)]
+        ).compactMap { row -> (day: String, frequency: Int)? in
+            guard let day = row.string("day"), let frequency = row.integer("frequency") else { return nil }
+            return (day, Int(frequency))
+        }
+
+        let keyRows = try database.query(
+            "SELECT day, keystrokes, backspaces FROM daily_key_stats WHERE day >= ?",
+            bindings: [.text(startDay)]
+        ).compactMap { row -> (day: String, keystrokes: Int, backspaces: Int)? in
+            guard let day = row.string("day") else { return nil }
+            return (day, Int(row.integer("keystrokes") ?? 0), Int(row.integer("backspaces") ?? 0))
+        }
+
+        let chords = try deviceChords()
+        let addedChordDays = chords
+            .filter { ["grow", "advisor", "quick_add", "suggestion", "user"].contains($0.source) && $0.createdAt >= builder.previousStart }
+            .map { usageDay(for: $0.createdAt) }
+        let chordsByWord = GrowthPlanner.chordsByOutputWord(chords)
+        let chordInputs = chordsByWord.compactMapValues { $0.first.map(GrowthPlanner.displayInput) }
+
+        return builder.build(
+            wordRows: wordRows,
+            chordRows: chordRows,
+            addedChordDays: addedChordDays,
+            keyRows: keyRows,
+            chordedWords: chordInputs,
+            typoWords: try typoWordSet(chordsByWord: chordsByWord),
+            mergedWords: try wordAliases(),
+            attributionStartDay: try database.query(
+                "SELECT MIN(day) AS day FROM daily_word_stats WHERE source IN (?, ?)",
+                bindings: [.text(UsageSource.m4gHIDConfirmed.rawValue), .text(UsageSource.m4gTyping.rawValue)]
+            ).first?.string("day")
+        )
+    }
+
+    /// Words that are one slip away from a word you use far more often.
+    private func typoWordSet(chordsByWord: [String: [ChordEntry]]) throws -> Set<String> {
+        if let cache = typoWordCache, Date().timeIntervalSince(cache.computedAt) < 15 * 60 {
+            return cache.words
+        }
+        let usage = try wordSourceUsage(days: nil)
+        let aliases = try wordAliases()
+        let dictionary = GrowthPlanner.loadSystemDictionary()
+        let knownFrequency = Dictionary(usage.map { ($0.word, $0.frequency) }, uniquingKeysWith: +)
+        var typos: Set<String> = []
+        for entry in usage where entry.language == .english && entry.word.count >= 3 && aliases[entry.word] == nil {
+            if GrowthPlanner.intendedWord(
+                forTypo: entry.word,
+                frequency: entry.frequency,
+                chordedWords: chordsByWord,
+                knownFrequency: knownFrequency,
+                dictionary: dictionary
+            ) != nil {
+                typos.insert(entry.word)
+            }
+        }
+        typoWordCache = (Date(), typos)
+        return typos
+    }
+}
+
