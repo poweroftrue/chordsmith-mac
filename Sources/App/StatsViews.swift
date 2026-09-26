@@ -160,8 +160,11 @@ struct StatsTabView<Details: View>: View {
         if let coverage = totals.coverageRate {
             parts.append("you had a chord for \(Self.percent(coverage)) of all words")
         }
-        if let m4g = totals.m4gWPM, let keyboard = totals.keyboardWPM {
-            parts.append("letter by letter you type \(Int(m4g.rounded())) WPM on the M4G and \(Int(keyboard.rounded())) WPM on other keyboards")
+        if let blended = totals.m4gBlendedWPM {
+            parts.append("you write \(Int(blended.rounded())) WPM on the M4G with chords and letters together")
+        }
+        if let m4g = totals.m4gLetterSpeedWPM ?? totals.m4gWPM, let keyboard = totals.keyboardSpeedWPM ?? totals.keyboardWPM {
+            parts.append("letter by letter \(Int(m4g.rounded())) WPM on the M4G and \(Int(keyboard.rounded())) WPM on other keyboards")
         }
         if totals.awayWords > 0 {
             parts.append("\(totals.awayWords.formatted()) words typed with no M4G connected don't count against your chord rate")
@@ -202,28 +205,20 @@ struct StatsTabView<Details: View>: View {
                 delta: comparable ? .points(current: totals.coverageRate, previous: previous.coverageRate, higherIsBetter: true) : nil,
                 footnote: "library coverage"
             )
-            if let blended = totals.m4gBlendedWPM {
-                StatTile(
-                    title: "M4G speed",
-                    value: "\(Int(blended.rounded())) WPM",
-                    delta: previous.m4gBlendedWPM != nil && comparable ? .relative(current: blended, previous: previous.m4gBlendedWPM, higherIsBetter: true) : nil,
-                    footnote: totals.keyboardSpeedWPM.map { "other keyboards \(Int($0.rounded())) WPM" } ?? "chords and letters together",
-                    swatch: StatsPalette.blended
-                )
-            } else {
-                StatTile(
-                    title: "M4G letter speed",
-                    value: totals.m4gWPM.map { "\(Int($0.rounded())) WPM" } ?? "—",
-                    delta: nil,
-                    footnote: totals.keyboardWPM.map { "other keyboards \(Int($0.rounded())) WPM" } ?? "no data yet",
-                    swatch: StatsPalette.m4gTyped
-                )
-            }
+            StatTile(
+                title: "M4G speed, blended",
+                value: totals.m4gBlendedWPM.map { "\(Int($0.rounded())) WPM" } ?? "—",
+                delta: comparable && totals.m4gBlendedWPM != nil && previous.m4gBlendedWPM != nil
+                    ? .relative(current: totals.m4gBlendedWPM, previous: previous.m4gBlendedWPM, higherIsBetter: true)
+                    : nil,
+                footnote: m4gSpeedFootnote,
+                swatch: StatsPalette.blended
+            )
             StatTile(
                 title: "Errors",
                 value: totals.errorRate.map { String(format: "%.1f", $0 * 100) } ?? "—",
                 delta: comparable ? .points(current: totals.errorRate, previous: previous.errorRate, higherIsBetter: false) : nil,
-                footnote: "typos + misfires per 100 words",
+                footnote: "typos + misfires / 100 words",
                 swatch: StatsPalette.typos
             )
             StatTile(
@@ -240,6 +235,22 @@ struct StatsTabView<Details: View>: View {
                 footnote: "\(totals.chordsAdded) chords added"
             )
         }
+    }
+
+    /// Chords and letters behind the blend, or what is still being measured.
+    private var m4gSpeedFootnote: String {
+        let totals = report.totals
+        if totals.m4gBlendedWPM != nil {
+            let parts = [
+                totals.chordSpeedWPM.map { "chords \(Int($0.rounded()))" },
+                totals.m4gLetterSpeedWPM.map { "letters \(Int($0.rounded()))" }
+            ].compactMap { $0 }
+            return parts.joined(separator: " · ") + " WPM"
+        }
+        if let letters = totals.m4gWPM {
+            return "measuring · letters \(Int(letters.rounded())) WPM"
+        }
+        return "measuring: type on the M4G"
     }
 
     // MARK: Lists
