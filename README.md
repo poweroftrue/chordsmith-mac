@@ -68,6 +68,12 @@ Default shortcuts:
 - `Cmd+Option+Space`: open quick advisor.
 - `Cmd+Shift+A`: open Quick Chords.
 - double-tap `Control`: open Quick Chords.
+- `Cmd+Option+Shift+Space`: open the panel in a full, resizable window.
+
+You can also open the window from the window button or the `⋯` menu in the
+panel, or by opening Chordsmith again from Spotlight or Finder while it is
+running. While the window is open Chordsmith appears in the Dock and the app
+switcher; `Cmd+W` closes it and returns it to the menu bar.
 
 Inside Quick Chords:
 

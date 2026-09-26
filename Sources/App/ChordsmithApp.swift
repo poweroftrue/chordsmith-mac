@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var quickChordPanel: NSPanel?
+    private var mainWindow: NSWindow?
     private var lastControlPress: Date?
     private var globalControlMonitor: Any?
     private var localControlMonitor: Any?
@@ -39,6 +40,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        model.openWindowAction = { [weak self] in
+            self?.showMainWindow()
+        }
         setupStatusItem()
         setupPopover()
         setupKeyboardShortcuts()
@@ -58,7 +62,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationDidBecomeActive(_ notification: Notification) {
+    /// Opening Chordsmith again from Spotlight, Finder or the Dock opens the
+    /// full window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showMainWindow()
+        return false
+    }
+
+        func applicationDidBecomeActive(_ notification: Notification) {
         model.refreshLaunchAtLoginStatus()
         model.resumeInputObservationIfNeeded()
     }
@@ -88,6 +99,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         KeyboardShortcuts.onKeyUp(for: .quickAdd) { [weak self] in
             self?.showQuickChordPanel()
+        }
+        KeyboardShortcuts.onKeyUp(for: .openWindow) { [weak self] in
+            self?.showMainWindow()
         }
     }
 
@@ -136,6 +150,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// The full panel in a normal, resizable window. While it is open the app
+    /// shows in the Dock and the app switcher; closing it returns Chordsmith
+    /// to a menu-bar-only app.
+    private func showMainWindow() {
+        popover?.performClose(nil)
+        quickChordPanel?.close()
+
+        let window: NSWindow
+        if let mainWindow {
+            window = mainWindow
+        } else {
+            window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 900, height: 760),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Chordsmith"
+            window.isReleasedWhenClosed = false
+            window.contentMinSize = NSSize(width: 560, height: 620)
+            window.contentViewController = NSHostingController(rootView: RootView(model: model, isWindowed: true))
+            window.setContentSize(NSSize(width: 900, height: 760))
+            window.setFrameAutosaveName("ChordsmithMainWindow")
+            if !window.setFrameUsingName("ChordsmithMainWindow") {
+                window.center()
+            }
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: window,
+                queue: .main
+            ) { _ in
+                Task { @MainActor in
+                    NSApp.setActivationPolicy(.accessory)
+                }
+            }
+            mainWindow = window
+        }
+
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 
     private func showQuickChordPanel() {
@@ -197,10 +254,12 @@ extension KeyboardShortcuts.Name {
     static let togglePanel = Self("togglePanel", default: .init(.space, modifiers: [.command, .shift]))
     static let quickAdvisor = Self("quickAdvisor", default: .init(.space, modifiers: [.command, .option]))
     static let quickAdd = Self("quickAdd", default: .init(.a, modifiers: [.command, .shift]))
+    static let openWindow = Self("openWindow", default: .init(.space, modifiers: [.command, .shift, .option]))
 }
 
 struct RootView: View {
     @ObservedObject var model: AppModel
+    var isWindowed = false
     @State private var searchText = ""
     @StateObject private var addController = QuickChordAddController()
     @State private var addFocusToken = 0
@@ -248,7 +307,15 @@ struct RootView: View {
             }
             .padding(12)
         }
-        .frame(width: 560, height: 620)
+        .frame(
+            minWidth: 560,
+            idealWidth: 560,
+            maxWidth: isWindowed ? .infinity : 560,
+            minHeight: 620,
+            idealHeight: 620,
+            maxHeight: isWindowed ? .infinity : 620
+        )
+        .background(isWindowed ? Color(nsColor: .windowBackgroundColor) : Color.clear)
         .background(LocalShortcutMonitor { event in
             handleShortcut(event)
         })
@@ -292,7 +359,22 @@ struct RootView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Reload the library and usage")
+                if !isWindowed {
+                    Button {
+                        model.openWindowAction?()
+                    } label: {
+                        Image(systemName: "macwindow")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Open in a window (⌥⇧⌘Space)")
+                }
                 Menu {
+                    if !isWindowed {
+                        Button("Open in Window") {
+                            model.openWindowAction?()
+                        }
+                        Divider()
+                    }
                     Button("Import Chord JSON…") {
                         Task { await model.importChordJSON() }
                     }
@@ -944,6 +1026,9 @@ struct RootView: View {
             case "s":
                 Task { await model.commitStagedChanges() }
                 return true
+            case "w" where isWindowed:
+                NSApp.keyWindow?.close()
+                return true
             case "z" where !model.stagedChanges.isEmpty:
                 model.undoLastStagedChange()
                 return true
@@ -961,7 +1046,8 @@ struct RootView: View {
             if event.keyCode == 51 {
                 return stageSelectedDelete()
             }
-            if event.keyCode == 53 {
+            // Esc dismisses the popover; a real window closes with ⌘W instead.
+            if event.keyCode == 53, !isWindowed {
                 closePopover()
                 return true
             }
@@ -1175,6 +1261,7 @@ struct SettingsView: View {
                 KeyboardShortcuts.Recorder(for: .togglePanel)
                 KeyboardShortcuts.Recorder(for: .quickAdvisor)
                 KeyboardShortcuts.Recorder(for: .quickAdd)
+                KeyboardShortcuts.Recorder("Open in window", name: .openWindow)
             }
 
             Section("Engine") {

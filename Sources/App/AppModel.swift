@@ -129,6 +129,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var practiceReport = PracticeReport.empty
     @Published private(set) var hasLoadedPracticeReport = false
 
+    /// Opens the panel in a standalone window; set by the app delegate.
+    var openWindowAction: (() -> Void)?
+
     let libraryService: LibraryService
     let deviceService: any AppDeviceService
     let recorder: TypingRecorder
