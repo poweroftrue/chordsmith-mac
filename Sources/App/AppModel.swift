@@ -129,6 +129,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var practiceReport = PracticeReport.empty
     @Published var coachSettings = CoachSettings()
     @Published var showChordRateInMenuBar = true
+    @Published var keepMenuBarIconVisible = true
     @Published private(set) var todayUsage = TodayUsage()
     @Published private(set) var currentNudge: Nudge?
     @Published private(set) var coachSnapshot = CoachingSnapshot.empty
@@ -316,6 +317,7 @@ final class AppModel: ObservableObject {
             try await libraryService.setSetting(keys.m4gOnly, value: coachSettings.m4gOnly ? "1" : "0")
             try await libraryService.setSetting(keys.maxPerHour, value: String(coachSettings.maxPerHour))
             try await libraryService.setSetting("menubar.chord_rate", value: showChordRateInMenuBar ? "1" : "0")
+            try await libraryService.setSetting("menubar.keep_visible", value: keepMenuBarIconVisible ? "1" : "0")
         } catch {
             lastError = error.localizedDescription
         }
@@ -338,6 +340,7 @@ final class AppModel: ObservableObject {
         }
         coachSettings = settings
         showChordRateInMenuBar = await flag("menubar.chord_rate", default: true)
+        keepMenuBarIconVisible = await flag("menubar.keep_visible", default: true)
     }
 
     // MARK: Phrases

@@ -4,6 +4,7 @@ import Device
 import Engine
 import KeyboardShortcuts
 import Library
+import OSLog
 import SwiftUI
 
 @main
@@ -26,6 +27,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var quickChordPanel: NSPanel?
     private var mainWindow: NSWindow?
     private var nudgeController: NudgePanelController?
+    private var lastStatusItemRescue: Date?
+    private let menuBarLogger = Logger(subsystem: "com.poweroftrue.chordsmith", category: "MenuBar")
+    private static let statusItemAutosaveName = "ChordsmithStatusItem"
     private var observers: Set<AnyCancellable> = []
     private var lastControlPress: Date?
     private var globalControlMonitor: Any?
@@ -93,16 +97,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem?.autosaveName = Self.statusItemAutosaveName
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "keyboard.badge.ellipsis", accessibilityDescription: "Chordsmith")
             button.action = #selector(togglePopover)
             button.target = self
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            self?.rescueStatusItemIfHidden()
+        }
+    }
+
+    /// On a MacBook with a camera notch, menu bar items that don't fit are
+    /// placed behind the notch, where nobody can see or click them.
+    private var isStatusItemHidden: Bool {
+        guard let window = statusItem?.button?.window else { return true }
+        let frame = window.frame
+        guard let screen = window.screen ?? NSScreen.main else { return false }
+        if frame.maxX <= screen.frame.minX || frame.minX >= screen.frame.maxX {
+            return true
+        }
+        if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
+            return frame.maxX > left.maxX && frame.minX < right.minX
+        }
+        return false
+    }
+
+    /// Moves the icon to just right of the notch when it has been pushed
+    /// behind it. macOS then hides the leftmost other icon instead. Room is
+    /// left for the widest title ("100%"), and the move is verified and
+    /// retried further right if the icon is still hidden.
+    private func rescueStatusItemIfHidden(attempt: Int = 0) {
+        let frame = statusItem?.button?.window?.frame ?? .zero
+        menuBarLogger.notice("Menu bar icon at x=\(frame.minX, privacy: .public) width=\(frame.width, privacy: .public) hidden=\(self.isStatusItemHidden, privacy: .public)")
+        guard model.keepMenuBarIconVisible, isStatusItemHidden,
+              let screen = statusItem?.button?.window?.screen ?? NSScreen.main,
+              let notchRight = screen.auxiliaryTopRightArea?.minX else { return }
+        if attempt == 0, let lastStatusItemRescue, Date().timeIntervalSince(lastStatusItemRescue) < 600 { return }
+        guard attempt < 4 else { return }
+        lastStatusItemRescue = Date()
+
+        let widestTitle: CGFloat = 90
+        // The preferred position is the distance from the screen's right
+        // edge to the icon's right edge.
+        let position = max(0, screen.frame.maxX - notchRight - widestTitle - 12 - CGFloat(attempt) * 60)
+        if let statusItem {
+            NSStatusBar.system.removeStatusItem(statusItem)
+        }
+        UserDefaults.standard.set(position, forKey: "NSStatusItem Preferred Position \(Self.statusItemAutosaveName)")
+        menuBarLogger.notice("Moved menu bar icon out from behind the notch to position \(position, privacy: .public)")
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem?.autosaveName = Self.statusItemAutosaveName
+        if let button = statusItem?.button {
+            button.image = NSImage(systemSymbolName: "keyboard.badge.ellipsis", accessibilityDescription: "Chordsmith")
+            button.action = #selector(togglePopover)
+            button.target = self
+        }
+        applyStatusItemTitle()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, self.isStatusItemHidden else { return }
+            self.rescueStatusItemIfHidden(attempt: attempt + 1)
+        }
+    }
+
+    private func applyStatusItemTitle() {
+        updateStatusItem(
+            usage: model.todayUsage,
+            visible: model.showChordRateInMenuBar,
+            m4gConnected: model.inputObserver.isM4GConnected,
+            checkPlacement: false
+        )
     }
 
     /// Today's chord rate beside the menu bar icon, with the details and the
     /// goal in the tooltip.
-    private func updateStatusItem(usage: TodayUsage, visible: Bool, m4gConnected: Bool) {
+    private func updateStatusItem(usage: TodayUsage, visible: Bool, m4gConnected: Bool, checkPlacement: Bool = true) {
         guard let button = statusItem?.button else { return }
         let pausedNote = "Master Forge not connected: chord hints are paused and typing doesn't count against your chord rate."
         guard visible, let rate = usage.chordRate, usage.words >= 20 else {
@@ -132,6 +201,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lines.append(pausedNote)
         }
         button.toolTip = lines.joined(separator: "\n")
+        // A wider title can push the icon behind the notch.
+        if checkPlacement {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.rescueStatusItemIfHidden()
+            }
+        }
         button.setAccessibilityLabel("Chordsmith, \(Int((rate * 100).rounded())) percent chorded today")
     }
 
@@ -185,6 +260,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func togglePopover() {
         guard let popover else { return }
+        // A popover pinned to an icon hidden behind the notch would appear
+        // nowhere useful; open the full window instead.
+        if !popover.isShown, isStatusItemHidden {
+            showMainWindow()
+            return
+        }
         if popover.isShown {
             popover.performClose(nil)
         } else {
@@ -197,6 +278,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quickChordPanel?.close()
         if let tab {
             model.selectedTab = tab
+        }
+        if isStatusItemHidden {
+            showMainWindow()
+            return
         }
         if !popover.isShown {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
@@ -1287,6 +1372,8 @@ struct SettingsView: View {
                 }
                 .disabled(!model.coachSettings.enabled)
                 Toggle("Show today's chord rate in the menu bar", isOn: $model.showChordRateInMenuBar)
+                Toggle("Keep the menu bar icon out from behind the camera notch", isOn: $model.keepMenuBarIconVisible)
+                    .help("When the menu bar is full, macOS hides icons behind the notch. Chordsmith moves itself to the right of the notch instead.")
                 Text("Hints appear under the menu bar without taking focus, and fade on their own. They pause automatically while no Master Forge is connected.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1295,6 +1382,9 @@ struct SettingsView: View {
                 Task { await model.saveCoachSettings() }
             }
             .onChange(of: model.showChordRateInMenuBar) { _ in
+                Task { await model.saveCoachSettings() }
+            }
+            .onChange(of: model.keepMenuBarIconVisible) { _ in
                 Task { await model.saveCoachSettings() }
             }
 
