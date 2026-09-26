@@ -55,6 +55,18 @@ public struct StatsBucket: Codable, Hashable, Sendable, Identifiable {
     public var chordsAdded = 0
     public var keystrokes = 0
     public var backspaces = 0
+    /// Words-per-minute samples: characters (with the space) and the time
+    /// from the end of the previous word, per input method.
+    public var keyboardSpeedChars = 0
+    public var keyboardSpeedMs = 0.0
+    public var m4gLetterSpeedChars = 0
+    public var m4gLetterSpeedMs = 0.0
+    public var chordSpeedChars = 0
+    public var chordSpeedMs = 0.0
+    /// Chords deleted straight away, and chord-speed output that matched
+    /// no chord and no word.
+    public var deletedMisfires = 0
+    public var garbledMisfires = 0
 
     public init(start: Date) {
         self.start = start
@@ -66,7 +78,31 @@ public struct StatsBucket: Codable, Hashable, Sendable, Identifiable {
 
     public var chordRate: Double? { words > 0 ? Double(chordedWords) / Double(words) : nil }
     public var coverageRate: Double? { words > 0 ? Double(coveredWords) / Double(words) : nil }
-    public var typoRate: Double? { words > 0 ? Double(typoWords) / Double(words) : nil }
+    /// Typos per word typed by hand: chords never produce letter slips.
+    public var typoRate: Double? { handTypedWords > 0 ? Double(typoWords) / Double(handTypedWords) : nil }
+    public var misfires: Int { deletedMisfires + garbledMisfires }
+    /// Misfires per chord attempt. Deleted chords never reached the stats,
+    /// so they are added back to the attempts.
+    public var misfireRate: Double? {
+        let attempts = chordsUsed + deletedMisfires
+        return attempts > 0 ? Double(misfires) / Double(attempts) : nil
+    }
+    /// Typos and misfires together, per word written.
+    public var errorRate: Double? {
+        let attempts = words + deletedMisfires
+        return attempts > 0 ? Double(typoWords + misfires) / Double(attempts) : nil
+    }
+
+    /// Real typing speed: word plus space over the time since the previous
+    /// word, pauses over three seconds left out.
+    public var keyboardSpeedWPM: Double? { Self.wpm(letters: keyboardSpeedChars, ms: keyboardSpeedMs) }
+    public var m4gLetterSpeedWPM: Double? { Self.wpm(letters: m4gLetterSpeedChars, ms: m4gLetterSpeedMs) }
+    public var chordSpeedWPM: Double? { Self.wpm(letters: chordSpeedChars, ms: chordSpeedMs) }
+    /// Everything written on the Master Forge, chords and letters together.
+    public var m4gBlendedWPM: Double? {
+        Self.wpm(letters: chordSpeedChars + m4gLetterSpeedChars, ms: chordSpeedMs + m4gLetterSpeedMs)
+    }
+    public var hasSpeedSamples: Bool { keyboardSpeedChars + m4gLetterSpeedChars + chordSpeedChars > 0 }
     public var keyboardWPM: Double? { Self.wpm(letters: keyboardLetters, ms: keyboardMs) }
     public var m4gWPM: Double? { Self.wpm(letters: m4gLetters, ms: m4gMs) }
     public var backspaceRate: Double? { keystrokes > 0 ? Double(backspaces) / Double(keystrokes) : nil }
@@ -93,6 +129,14 @@ public struct StatsBucket: Codable, Hashable, Sendable, Identifiable {
         chordsAdded += other.chordsAdded
         keystrokes += other.keystrokes
         backspaces += other.backspaces
+        keyboardSpeedChars += other.keyboardSpeedChars
+        keyboardSpeedMs += other.keyboardSpeedMs
+        m4gLetterSpeedChars += other.m4gLetterSpeedChars
+        m4gLetterSpeedMs += other.m4gLetterSpeedMs
+        chordSpeedChars += other.chordSpeedChars
+        chordSpeedMs += other.chordSpeedMs
+        deletedMisfires += other.deletedMisfires
+        garbledMisfires += other.garbledMisfires
     }
 }
 
@@ -122,6 +166,10 @@ public struct StatsReport: Codable, Hashable, Sendable {
     public let bestDay: StatsBucket?
     public let topChorded: [StatsWordCount]
     public let topUnchorded: [StatsWordCount]
+    /// Chords that misfired most, with their keys when known.
+    public let topMisfires: [StatsWordCount]
+    /// First day with words-per-minute samples.
+    public let speedTrackingStart: Date?
     public let englishWords: Int
     public let arabicWords: Int
     public let otherWords: Int
@@ -168,9 +216,13 @@ public struct StatsReport: Codable, Hashable, Sendable {
         arabicWords: Int,
         otherWords: Int,
         attributionStart: Date?,
-        trackedTotals: StatsBucket? = nil
+        trackedTotals: StatsBucket? = nil,
+        topMisfires: [StatsWordCount] = [],
+        speedTrackingStart: Date? = nil
     ) {
         self.trackedTotals = trackedTotals
+        self.topMisfires = topMisfires
+        self.speedTrackingStart = speedTrackingStart
         self.period = period
         self.buckets = buckets
         self.totals = totals
@@ -264,7 +316,9 @@ public struct StatsBuilder: Sendable {
         chordedWords: [String: [String]],
         typoWords: Set<String>,
         mergedWords: [String: String],
-        attributionStartDay: String? = nil
+        attributionStartDay: String? = nil,
+        speedRows: [(day: String, method: SpeedMethod, characters: Int, ms: Double)] = [],
+        misfireRows: [(day: String, word: String, kind: MisfireKind, frequency: Int)] = []
     ) -> StatsReport {
         var current: [Date: StatsBucket] = [:]
         var previous = StatsBucket(start: previousStart)
@@ -343,6 +397,37 @@ public struct StatsBuilder: Sendable {
         for day in addedChordDays {
             withBucket(day: day) { $0.chordsAdded += 1 }
         }
+        var speedStart: Date?
+        for row in speedRows {
+            if let date = date(for: row.day) {
+                speedStart = min(speedStart ?? date, date)
+            }
+            withBucket(day: row.day) { bucket in
+                switch row.method {
+                case .keyboard:
+                    bucket.keyboardSpeedChars += row.characters
+                    bucket.keyboardSpeedMs += row.ms
+                case .m4gLetters:
+                    bucket.m4gLetterSpeedChars += row.characters
+                    bucket.m4gLetterSpeedMs += row.ms
+                case .m4gChords:
+                    bucket.chordSpeedChars += row.characters
+                    bucket.chordSpeedMs += row.ms
+                }
+            }
+        }
+        var misfireCounts: [String: Int] = [:]
+        for row in misfireRows {
+            withBucket(day: row.day) { bucket in
+                switch row.kind {
+                case .deleted: bucket.deletedMisfires += row.frequency
+                case .garbled: bucket.garbledMisfires += row.frequency
+                }
+            }
+            if let date = date(for: row.day), date >= currentStart {
+                misfireCounts[row.word, default: 0] += row.frequency
+            }
+        }
         for row in keyRows {
             withBucket(day: row.day) { bucket in
                 bucket.keystrokes += row.keystrokes
@@ -395,7 +480,9 @@ public struct StatsBuilder: Sendable {
             arabicWords: arabic,
             otherWords: other,
             attributionStart: attributionStart,
-            trackedTotals: trackedTotals
+            trackedTotals: trackedTotals,
+            topMisfires: Self.top(misfireCounts, chords: chordedWords, limit: 8),
+            speedTrackingStart: speedStart
         )
     }
 

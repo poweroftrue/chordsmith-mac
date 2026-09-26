@@ -16,6 +16,9 @@ enum StatsPalette {
     static let typos = dynamic(light: 0xE87BA4, dark: 0xD55181)
     static let time = dynamic(light: 0xEDA100, dark: 0xC98500)
     static let library = dynamic(light: 0x4A3AA7, dark: 0x9085E9)
+    static let misfires = dynamic(light: 0xE34948, dark: 0xE66767)
+    /// Everything on the Master Forge together: a neutral, emphasized line.
+    static let blended = Color.primary.opacity(0.75)
     static let context = Color.secondary.opacity(0.45)
     static let grid = Color.secondary.opacity(0.18)
 
@@ -53,10 +56,14 @@ struct StatsTabView<Details: View>: View {
                     kpiGrid
                     WordsChartCard(report: report)
                     ChordRateChartCard(report: report)
-                    SpeedChartCard(report: report)
+                    if report.totals.hasSpeedSamples {
+                        SpeedSection(report: report)
+                    } else {
+                        SpeedChartCard(report: report)
+                    }
+                    AccuracySection(model: model, report: report)
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 360), spacing: 16, alignment: .top)], spacing: 16) {
                         ChordsUsedChartCard(report: report)
-                        TyposChartCard(report: report)
                         TypingTimeChartCard(report: report)
                         ChordsAddedChartCard(report: report)
                     }
@@ -192,25 +199,29 @@ struct StatsTabView<Details: View>: View {
                 delta: comparable ? .points(current: totals.coverageRate, previous: previous.coverageRate, higherIsBetter: true) : nil,
                 footnote: "library coverage"
             )
+            if let blended = totals.m4gBlendedWPM {
+                StatTile(
+                    title: "M4G speed",
+                    value: "\(Int(blended.rounded())) WPM",
+                    delta: previous.m4gBlendedWPM != nil && comparable ? .relative(current: blended, previous: previous.m4gBlendedWPM, higherIsBetter: true) : nil,
+                    footnote: totals.keyboardSpeedWPM.map { "other keyboards \(Int($0.rounded())) WPM" } ?? "chords and letters together",
+                    swatch: StatsPalette.blended
+                )
+            } else {
+                StatTile(
+                    title: "M4G letter speed",
+                    value: totals.m4gWPM.map { "\(Int($0.rounded())) WPM" } ?? "—",
+                    delta: nil,
+                    footnote: totals.keyboardWPM.map { "other keyboards \(Int($0.rounded())) WPM" } ?? "no data yet",
+                    swatch: StatsPalette.m4gTyped
+                )
+            }
             StatTile(
-                title: "M4G letter speed",
-                value: totals.m4gWPM.map { "\(Int($0.rounded())) WPM" } ?? "—",
-                delta: comparableChords ? .relative(current: totals.m4gWPM, previous: previous.m4gWPM, higherIsBetter: true) : nil,
-                footnote: totals.keyboardWPM.map { "other keyboards \(Int($0.rounded())) WPM" } ?? "no data yet",
-                swatch: StatsPalette.m4gTyped
-            )
-            StatTile(
-                title: "Typos",
-                value: totals.typoRate.map { String(format: "%.1f", $0 * 100) } ?? "—",
-                delta: comparable ? .points(current: totals.typoRate, previous: previous.typoRate, higherIsBetter: false) : nil,
-                footnote: "per 100 words",
+                title: "Errors",
+                value: totals.errorRate.map { String(format: "%.1f", $0 * 100) } ?? "—",
+                delta: comparable ? .points(current: totals.errorRate, previous: previous.errorRate, higherIsBetter: false) : nil,
+                footnote: "typos + misfires per 100 words",
                 swatch: StatsPalette.typos
-            )
-            StatTile(
-                title: "Corrections",
-                value: totals.backspaceRate.map { String(format: "%.1f", $0 * 100) } ?? "—",
-                delta: comparable && previous.keystrokes > 0 ? .points(current: totals.backspaceRate, previous: previous.backspaceRate, higherIsBetter: false) : nil,
-                footnote: totals.keystrokes > 0 ? "backspaces per 100 keys" : "tracking starts now"
             )
             StatTile(
                 title: "Typing by hand",
@@ -1079,3 +1090,327 @@ private struct ChordsAddedChartCard: View {
         )
     }
 }
+
+// MARK: - Speed
+
+/// Speed per input method, grouped the way you type: other keyboards on one
+/// side, the Master Forge on the other with chords, letters and the blend.
+private struct SpeedSection: View {
+    let report: StatsReport
+    @State private var selected: StatsBucket?
+
+    private var totals: StatsBucket { report.totals }
+
+    private var summary: String {
+        if let selected {
+            let parts = [
+                selected.m4gBlendedWPM.map { "M4G \(Int($0.rounded())) WPM" },
+                selected.chordSpeedWPM.map { "chords \(Int($0.rounded()))" },
+                selected.m4gLetterSpeedWPM.map { "letters \(Int($0.rounded()))" },
+                selected.keyboardSpeedWPM.map { "other keyboards \(Int($0.rounded()))" }
+            ].compactMap { $0 }
+            return "\(ChartAxes.readoutDate(selected.start, period: report.period)): " + (parts.isEmpty ? "no typing" : parts.joined(separator: " · ")) + "."
+        }
+        switch (totals.chordSpeedWPM, totals.m4gLetterSpeedWPM) {
+        case (let chords?, let letters?) where letters > 0:
+            let ratio = chords / letters
+            return String(format: "On the M4G your chords run at %.1f× your letter-by-letter speed. Every word you move from letters to a chord speeds up the blend.", ratio)
+        default:
+            return "Real typing speed, pauses over 3 seconds left out."
+        }
+    }
+
+    var body: some View {
+        StatsCard(title: "Speed", summary: summary) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 12) {
+                    SpeedGroup(title: "Other keyboard", systemImage: "keyboard") {
+                        SpeedFigure(label: "Letter by letter", wpm: totals.keyboardSpeedWPM, color: StatsPalette.keyboard, prominent: true)
+                    }
+                    .frame(maxWidth: 200)
+                    SpeedGroup(title: "Master Forge", systemImage: "keyboard.badge.ellipsis") {
+                        HStack(alignment: .top, spacing: 18) {
+                            SpeedFigure(label: "Blended", wpm: totals.m4gBlendedWPM, color: StatsPalette.blended, prominent: true)
+                            SpeedFigure(label: "Chorded", wpm: totals.chordSpeedWPM, color: StatsPalette.chorded, prominent: false)
+                            SpeedFigure(label: "Letter by letter", wpm: totals.m4gLetterSpeedWPM, color: StatsPalette.m4gTyped, prominent: false)
+                        }
+                    }
+                }
+
+                Chart {
+                    ForEach(report.buckets) { bucket in
+                        line(bucket, value: bucket.keyboardSpeedWPM, series: "Other keyboard", color: StatsPalette.keyboard)
+                        line(bucket, value: bucket.m4gBlendedWPM, series: "M4G blended", color: StatsPalette.blended)
+                        line(bucket, value: bucket.chordSpeedWPM, series: "Chorded", color: StatsPalette.chorded)
+                        line(bucket, value: bucket.m4gLetterSpeedWPM, series: "M4G letter by letter", color: StatsPalette.m4gTyped)
+                    }
+                    if let selected {
+                        RuleMark(x: .value("Selected", selected.start, unit: ChartAxes.unit(for: report.period)))
+                            .foregroundStyle(Color.secondary.opacity(0.3))
+                            .accessibilityHidden(true)
+                    }
+                }
+                .chartForegroundStyleScale([
+                    "Other keyboard": StatsPalette.keyboard,
+                    "M4G blended": StatsPalette.blended,
+                    "Chorded": StatsPalette.chorded,
+                    "M4G letter by letter": StatsPalette.m4gTyped
+                ])
+                .chartLegend(position: .top, alignment: .leading)
+                .chartOverlay { proxy in
+                    BucketHoverOverlay(proxy: proxy, buckets: report.buckets, selected: $selected)
+                }
+                .statsAxes(report: report)
+                .frame(height: 170)
+
+                Text(footnote)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ChartContentBuilder
+    private func line(_ bucket: StatsBucket, value: Double?, series: String, color: Color) -> some ChartContent {
+        if let value {
+            LineMark(
+                x: .value("Date", bucket.start, unit: ChartAxes.unit(for: report.period)),
+                y: .value("WPM", value),
+                series: .value("Method", series)
+            )
+            .foregroundStyle(by: .value("Method", series))
+            .lineStyle(StrokeStyle(lineWidth: series == "M4G blended" ? 3 : 2))
+            PointMark(
+                x: .value("Date", bucket.start, unit: ChartAxes.unit(for: report.period)),
+                y: .value("WPM", value)
+            )
+            .foregroundStyle(by: .value("Method", series))
+            .symbolSize(16)
+            .accessibilityLabel("\(ChartAxes.readoutDate(bucket.start, period: report.period)), \(series)")
+            .accessibilityValue("\(Int(value.rounded())) words per minute")
+        }
+    }
+
+    private var footnote: String {
+        var text = "Each word and its space, timed from the end of the previous word; pauses over 3 seconds are left out. 1 word = 5 characters."
+        if let start = report.speedTrackingStart {
+            text += " Speed tracking since \(start.formatted(.dateTime.month(.abbreviated).day()))."
+        }
+        return text
+    }
+}
+
+private struct SpeedGroup<Content: View>: View {
+    let title: String
+    let systemImage: String
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct SpeedFigure: View {
+    let label: String
+    let wpm: Double?
+    let color: Color
+    let prominent: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Circle().fill(color).frame(width: 7, height: 7).accessibilityHidden(true)
+                Text(label)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(wpm.map { "\(Int($0.rounded()))" } ?? "—")
+                    .font(.system(prominent ? .title : .title3, design: .rounded).weight(.semibold))
+                    .monospacedDigit()
+                Text("WPM")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - Accuracy
+
+/// Typos and chord misfires are both errors, but they have different fixes,
+/// so they are counted side by side rather than lumped together.
+private struct AccuracySection: View {
+    @ObservedObject var model: AppModel
+    let report: StatsReport
+    @State private var selected: StatsBucket?
+
+    private var totals: StatsBucket { report.totals }
+
+    private var summary: String {
+        if let selected {
+            let typo = selected.typoRate.map { String(format: "%.1f typos per 100 hand-typed words", $0 * 100) } ?? "no hand typing"
+            let misfire = selected.misfireRate.map { String(format: "%.1f misfires per 100 chords", $0 * 100) } ?? "no chords"
+            return "\(ChartAxes.readoutDate(selected.start, period: report.period)): \(typo), \(misfire)."
+        }
+        var text = "\(totals.typoWords.formatted()) typos and \(totals.misfires.formatted()) chord misfires."
+        if let first = report.topMisfires.first {
+            text += " \(first.word) misfires most; a different chord for it may fire more reliably."
+        }
+        return text
+    }
+
+    var body: some View {
+        StatsCard(title: "Accuracy", summary: summary) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 12) {
+                    AccuracyFigure(
+                        label: "Typos",
+                        value: totals.typoRate,
+                        unit: "per 100 words typed by hand",
+                        color: StatsPalette.typos
+                    )
+                    AccuracyFigure(
+                        label: "Chord misfires",
+                        value: totals.misfireRate,
+                        unit: "per 100 chords · \(totals.deletedMisfires) deleted, \(totals.garbledMisfires) garbled",
+                        color: StatsPalette.misfires
+                    )
+                    AccuracyFigure(
+                        label: "Corrections",
+                        value: totals.backspaceRate,
+                        unit: "backspaces per 100 keys, including ones the M4G sends",
+                        color: nil
+                    )
+                }
+
+                Chart {
+                    ForEach(report.buckets) { bucket in
+                        if let typo = bucket.typoRate {
+                            LineMark(
+                                x: .value("Date", bucket.start, unit: ChartAxes.unit(for: report.period)),
+                                y: .value("Rate", typo),
+                                series: .value("Kind", "Typos")
+                            )
+                            .foregroundStyle(StatsPalette.typos)
+                            .lineStyle(StrokeStyle(lineWidth: 2))
+                            .accessibilityLabel("\(ChartAxes.readoutDate(bucket.start, period: report.period)), typos")
+                            .accessibilityValue(String(format: "%.1f per 100 hand-typed words", typo * 100))
+                        }
+                        if report.isTracked(bucket), let misfire = bucket.misfireRate {
+                            LineMark(
+                                x: .value("Date", bucket.start, unit: ChartAxes.unit(for: report.period)),
+                                y: .value("Rate", misfire),
+                                series: .value("Kind", "Misfires")
+                            )
+                            .foregroundStyle(StatsPalette.misfires)
+                            .lineStyle(StrokeStyle(lineWidth: 2))
+                            PointMark(
+                                x: .value("Date", bucket.start, unit: ChartAxes.unit(for: report.period)),
+                                y: .value("Rate", misfire)
+                            )
+                            .foregroundStyle(StatsPalette.misfires)
+                            .symbol(.diamond)
+                            .symbolSize(22)
+                            .accessibilityLabel("\(ChartAxes.readoutDate(bucket.start, period: report.period)), misfires")
+                            .accessibilityValue(String(format: "%.1f per 100 chords", misfire * 100))
+                        }
+                    }
+                    if let selected {
+                        RuleMark(x: .value("Selected", selected.start, unit: ChartAxes.unit(for: report.period)))
+                            .foregroundStyle(Color.secondary.opacity(0.3))
+                            .accessibilityHidden(true)
+                    }
+                }
+                .chartYScale(domain: 0...max(0.05, maxRate))
+                .chartOverlay { proxy in
+                    BucketHoverOverlay(proxy: proxy, buckets: report.buckets, selected: $selected)
+                }
+                .statsAxes(report: report, percent: true)
+                .frame(height: 140)
+
+                HStack(spacing: 14) {
+                    LegendItem(color: StatsPalette.typos, label: "Typos", value: nil)
+                    LegendItem(color: StatsPalette.misfires, label: "Chord misfires", value: nil)
+                }
+
+                if !report.topMisfires.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Most misfired chords")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        ForEach(report.topMisfires) { misfire in
+                            HStack(spacing: 8) {
+                                Text(misfire.word)
+                                    .font(.callout)
+                                    .frame(width: 120, alignment: .leading)
+                                if let input = misfire.chordInput {
+                                    ActionTokenRow(tokens: input).fixedSize()
+                                } else {
+                                    Text("letters, no chord")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text("\(misfire.count)×")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                if misfire.chordInput != nil {
+                                    Button("Re-map") { model.openAdvisor(for: misfire.word) }
+                                        .buttonStyle(.link)
+                                        .font(.caption)
+                                        .help("Find a different chord for \(misfire.word) in Advisor")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var maxRate: Double {
+        report.buckets.flatMap { [$0.typoRate, report.isTracked($0) ? $0.misfireRate : nil] }.compactMap { $0 }.max() ?? 0
+    }
+}
+
+private struct AccuracyFigure: View {
+    let label: String
+    let value: Double?
+    let unit: String
+    let color: Color?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                if let color {
+                    Circle().fill(color).frame(width: 7, height: 7).accessibilityHidden(true)
+                }
+                Text(label)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Text(value.map { String(format: "%.1f", $0 * 100) } ?? "—")
+                .font(.system(.title2, design: .rounded).weight(.semibold))
+                .monospacedDigit()
+            Text(unit)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .combine)
+    }
+}
+

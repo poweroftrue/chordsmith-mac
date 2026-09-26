@@ -571,6 +571,81 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(words.map(\.source), [.m4gHIDConfirmed, .keyboard])
     }
 
+    func testUsageRecorderTimesWordsFromTheEndOfThePreviousWord() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let recorder = TypingRecorder(libraryService: library)
+        let start = Date()
+
+        await recorder.observeKeyboardText("the ", source: .m4g, startedAt: start, endedAt: start.addingTimeInterval(0.006))
+        await recorder.observeKeyboardText("exit ", startedAt: start.addingTimeInterval(0.6), endedAt: start.addingTimeInterval(1.0))
+        await recorder.observeKeyboardText("goes ", source: .m4g, startedAt: start.addingTimeInterval(1.3), endedAt: start.addingTimeInterval(1.306))
+        // A long pause: not typing speed.
+        await recorder.observeKeyboardText("late ", startedAt: start.addingTimeInterval(9), endedAt: start.addingTimeInterval(9.4))
+        await recorder.flush()
+
+        let speed = try await library.todayUsage(goalWords: []).speed
+        XCTAssertEqual(speed.keyboardSpeedChars, 5)
+        XCTAssertEqual(speed.keyboardSpeedMs, 915, accuracy: 20)
+        XCTAssertEqual(speed.chordSpeedChars, 5)
+        XCTAssertEqual(speed.chordSpeedMs, 385, accuracy: 20)
+    }
+
+    func testUsageRecorderCountsADeletedChordAsAMisfire() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let recorder = TypingRecorder(libraryService: library)
+        let start = Date().addingTimeInterval(-5)
+
+        await recorder.observeKeyboardText("than ", source: .m4g, startedAt: start, endedAt: start.addingTimeInterval(0.008))
+        for _ in 0..<5 { await recorder.observeBackspace() }
+        await recorder.observeKeyboardText("then ", source: .m4g, startedAt: start.addingTimeInterval(1), endedAt: start.addingTimeInterval(1.008))
+        await recorder.flush()
+
+        let report = try await library.statsReport(period: .week)
+        XCTAssertEqual(report.totals.deletedMisfires, 1)
+        XCTAssertEqual(report.topMisfires.first?.word, "than")
+    }
+
+    func testUsageRecorderDoesNotCountADeviceReplacementAsAMisfire() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let recorder = TypingRecorder(libraryService: library)
+        let chordAt = Date().addingTimeInterval(-0.05)
+
+        // A past-tense modifier: the device deletes `run ` and types `ran `.
+        await recorder.observeKeyboardText("run ", source: .m4g, startedAt: chordAt, endedAt: chordAt.addingTimeInterval(0.006))
+        for _ in 0..<4 { await recorder.observeBackspace() }
+        let replacedAt = Date()
+        await recorder.observeKeyboardText("ran ", source: .m4g, startedAt: replacedAt, endedAt: replacedAt.addingTimeInterval(0.006))
+        await recorder.flush()
+
+        let report = try await library.statsReport(period: .week)
+        XCTAssertEqual(report.totals.deletedMisfires, 0)
+    }
+
+    func testUsageRecorderDoesNotCountDeletingTypedLettersAsAMisfire() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let recorder = TypingRecorder(libraryService: library)
+        let start = Date()
+
+        await recorder.observeKeyboardText("oops", source: .m4g, startedAt: start, endedAt: start.addingTimeInterval(0.6))
+        for _ in 0..<4 { await recorder.observeBackspace() }
+        await recorder.flush()
+
+        let report = try await library.statsReport(period: .week)
+        XCTAssertEqual(report.totals.misfires, 0)
+    }
+
     func testSoftwareChordPhraseRecordsIndividualMultilingualWords() async throws {
         let temp = try TemporaryDirectory()
         defer { temp.remove() }

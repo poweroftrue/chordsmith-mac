@@ -253,7 +253,8 @@ final class AppModel: ObservableObject {
             word: event.word,
             source: event.source,
             avgMs: event.avgMs,
-            isGoalWord: coachSnapshot.goalWords.contains(event.word)
+            isGoalWord: coachSnapshot.goalWords.contains(event.word),
+            cycleMs: event.cycleMs
         )
         if todayPublishTask == nil {
             todayPublishTask = Task { [weak self] in
@@ -283,7 +284,17 @@ final class AppModel: ObservableObject {
         )
     }
 
-    func skipGrowthWord(named word: String) async {
+    /// Asks the panel to show Advisor for `word`, e.g. to re-map a chord
+    /// that keeps misfiring.
+    @Published var advisorRequest: String?
+
+    func openAdvisor(for word: String) {
+        advisorRequest = word
+        selectedTab = .advisor
+        openWindowAction?()
+    }
+
+        func skipGrowthWord(named word: String) async {
         do {
             try await libraryService.setGrowthWordSkipped(word, skipped: true)
             statusText = "\(word) will not be suggested again"

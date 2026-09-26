@@ -223,6 +223,8 @@ public struct TodayUsage: Sendable {
     public var keyboardMs = 0.0
     /// Letter-by-letter count per word today.
     public var handCounts: [String: Int] = [:]
+    /// Words-per-minute samples for today, per input method.
+    public var speed = StatsBucket(start: .distantPast)
 
     public init(day: Date = .now) {
         self.day = day
@@ -235,9 +237,24 @@ public struct TodayUsage: Sendable {
     public var keyboardWPM: Double? { StatsBucket.wpm(letters: keyboardLetters, ms: keyboardMs) }
 
     /// Adds one recorded word.
-    public mutating func record(word: String, source: UsageSource, avgMs: Double, isGoalWord: Bool) {
+    public mutating func record(word: String, source: UsageSource, avgMs: Double, isGoalWord: Bool, cycleMs: Double? = nil) {
         let letters = word.count
         let ms = min(avgMs, 3_000)
+        if let cycleMs {
+            switch source {
+            case .m4gHIDConfirmed:
+                speed.chordSpeedChars += letters + 1
+                speed.chordSpeedMs += cycleMs
+            case .m4gTyping:
+                speed.m4gLetterSpeedChars += letters + 1
+                speed.m4gLetterSpeedMs += cycleMs
+            case .keyboard:
+                speed.keyboardSpeedChars += letters + 1
+                speed.keyboardSpeedMs += cycleMs
+            case .softwareChord, .nexusImport:
+                break
+            }
+        }
         switch source {
         case .m4gHIDConfirmed, .softwareChord:
             chordedWords += 1

@@ -377,6 +377,33 @@ final class SQLiteDatabase {
             )
             """
         )
+        // Words-per-minute samples: characters and time from the end of the
+        // previous word, per input method (keyboard, M4G letters, M4G chords).
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_speed_stats (
+                day TEXT NOT NULL,
+                method TEXT NOT NULL,
+                words INTEGER NOT NULL,
+                characters INTEGER NOT NULL,
+                cycle_ms REAL NOT NULL,
+                PRIMARY KEY (day, method)
+            )
+            """
+        )
+        // Chords that fired wrong: deleted right away, or letters that came
+        // out at chord speed but match no chord and no word.
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_misfire_stats (
+                day TEXT NOT NULL,
+                word TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                frequency INTEGER NOT NULL,
+                PRIMARY KEY (day, word, kind)
+            )
+            """
+        )
         // Keystroke and backspace counts per day, for the correction rate.
         try execute(
             """

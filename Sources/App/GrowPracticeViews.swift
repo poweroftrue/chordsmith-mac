@@ -665,14 +665,21 @@ private struct LetterSpeedCard: View {
 
     private var summary: String {
         let usage = model.todayUsage
+        let speed = usage.speed
         var parts: [String] = []
-        if let m4g = usage.m4gWPM {
-            parts.append("Today on the M4G: \(Int(m4g.rounded())) WPM")
+        if let letters = speed.m4gLetterSpeedWPM ?? usage.m4gWPM {
+            parts.append("Today on the M4G, letter by letter: \(Int(letters.rounded())) WPM")
         } else {
             parts.append("No M4G letter-by-letter typing today yet")
         }
-        if let keyboard = usage.keyboardWPM {
-            parts.append("other keyboards \(Int(keyboard.rounded())) WPM")
+        if let chords = speed.chordSpeedWPM {
+            parts.append("chords \(Int(chords.rounded()))")
+        }
+        if let blended = speed.m4gBlendedWPM {
+            parts.append("blended \(Int(blended.rounded()))")
+        }
+        if let keyboard = speed.keyboardSpeedWPM ?? usage.keyboardWPM {
+            parts.append("other keyboards \(Int(keyboard.rounded()))")
         }
         if let last = model.speedDrillHistory.last {
             parts.append("last drill \(Int(last.wpm.rounded())) WPM at \(Int((last.accuracy * 100).rounded()))% accuracy")

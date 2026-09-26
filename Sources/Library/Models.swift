@@ -245,6 +245,20 @@ public enum UsageSource: String, Codable, CaseIterable, Sendable, Identifiable {
     }
 }
 
+/// How a word was produced, for words-per-minute.
+public enum SpeedMethod: String, Codable, CaseIterable, Sendable {
+    case keyboard
+    case m4gLetters = "m4g_letters"
+    case m4gChords = "m4g_chords"
+}
+
+public enum MisfireKind: String, Codable, CaseIterable, Sendable {
+    /// A chord's output deleted straight away.
+    case deleted
+    /// Letters at chord speed that match no chord and no word.
+    case garbled
+}
+
 public enum ChordUsageConfidence: String, Codable, CaseIterable, Sendable, Identifiable {
     case exactSoftware = "exact_software"
     case confirmedHardware = "confirmed_hardware"

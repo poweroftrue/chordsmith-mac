@@ -117,7 +117,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let goal = usage.goalRate {
             lines.append("Goal: 90% of your 50 most-used chorded words. Today \(Int((goal * 100).rounded()))%.")
         }
-        if let m4g = usage.m4gWPM {
+        if let blended = usage.speed.m4gBlendedWPM {
+            let chords = usage.speed.chordSpeedWPM.map { "chords \(Int($0.rounded()))" }
+            let letters = usage.speed.m4gLetterSpeedWPM.map { "letters \(Int($0.rounded()))" }
+            let detail = [chords, letters].compactMap { $0 }.joined(separator: ", ")
+            lines.append("M4G speed today: \(Int(blended.rounded())) WPM" + (detail.isEmpty ? "" : " (\(detail))"))
+        } else if let m4g = usage.m4gWPM {
             lines.append("M4G letter speed today: \(Int(m4g.rounded())) WPM")
         }
         button.toolTip = lines.joined(separator: "\n")
@@ -365,6 +370,12 @@ struct RootView: View {
         }
         .onChange(of: model.selectedTab) { tab in
             focusDefaultField(for: tab)
+        }
+        .onChange(of: model.advisorRequest) { word in
+            guard let word else { return }
+            advisorWord = word
+            model.advisorRequest = nil
+            Task { await model.adviseChord(for: word) }
         }
         .alert("Error", isPresented: Binding(
             get: { model.lastError != nil },

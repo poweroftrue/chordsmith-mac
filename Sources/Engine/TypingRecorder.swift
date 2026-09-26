@@ -9,12 +9,16 @@ public struct RecordedWord: Sendable {
     public let source: UsageSource
     public let avgMs: Double
     public let language: WordLanguage
+    /// Milliseconds from the end of the previous word, when typing was
+    /// continuous; nil after a pause.
+    public let cycleMs: Double?
 
-    public init(word: String, source: UsageSource, avgMs: Double, language: WordLanguage) {
+    public init(word: String, source: UsageSource, avgMs: Double, language: WordLanguage, cycleMs: Double? = nil) {
         self.word = word
         self.source = source
         self.avgMs = avgMs
         self.language = language
+        self.cycleMs = cycleMs
     }
 }
 
@@ -49,6 +53,14 @@ public actor UsageRecorder {
     private var phraseRun: [(word: String, handTyped: Bool)] = []
     private var previousWordJoinsNext = false
     private var wordObserver: (@Sendable (RecordedWord) -> Void)?
+    /// When the previous word ended, for words-per-minute.
+    private var lastWordEndedAt: Date?
+    /// Longer gaps are pauses, not typing speed.
+    private let speedPauseLimit: TimeInterval = 3
+    /// What the buffer held when backspacing began, to spot a chord that was
+    /// deleted outright.
+    private var deletionStart: [BufferedCharacter]?
+    private var pendingMisfires: [(word: String, at: Date)] = []
 
     private let newWordThreshold: TimeInterval = 5.0
     /// Upper bound for the gap between characters of one chord output.
@@ -100,6 +112,13 @@ public actor UsageRecorder {
                 if buffer.isEmpty {
                     await commitPendingWord(nextWordStarted: true)
                 }
+                deletionStart = nil
+                // The device replacing its own output (a modifier turning
+                // `run` into `ran`) deletes and retypes within milliseconds.
+                if source == .m4g, let last = pendingMisfires.last,
+                   abs(timestamp.timeIntervalSince(last.at)) < 0.15 {
+                    pendingMisfires.removeLast()
+                }
                 buffer.append(
                     BufferedCharacter(
                         character: character,
@@ -122,7 +141,13 @@ public actor UsageRecorder {
     public func observeBackspace() {
         pendingBackspaces += 1
         if !buffer.isEmpty {
+            if deletionStart == nil {
+                deletionStart = buffer
+            }
             buffer.removeLast()
+            if buffer.isEmpty {
+                noteDeletedChord()
+            }
         } else if var pending = pendingWord {
             pending.trailingDelimiters -= 1
             if !pending.delimiters.isEmpty {
@@ -130,6 +155,7 @@ public actor UsageRecorder {
             }
             if pending.trailingDelimiters <= 0 {
                 buffer = pending.characters
+                deletionStart = pending.characters
                 pendingWord = nil
             } else {
                 pendingWord = pending
@@ -148,9 +174,34 @@ public actor UsageRecorder {
     public func observeDeleteWord() {
         pendingBackspaces += 1
         if !buffer.isEmpty {
+            if deletionStart == nil {
+                deletionStart = buffer
+            }
             buffer.removeAll()
-        } else {
+        } else if let pending = pendingWord {
+            deletionStart = pending.characters
             pendingWord = nil
+        }
+        noteDeletedChord()
+    }
+
+    /// A chord's whole output deleted before the next word is a misfire:
+    /// the wrong word came out. Deleting only part of it is an edit.
+    private func noteDeletedChord() {
+        defer { deletionStart = nil }
+        guard let deleted = deletionStart,
+              deleted.allSatisfy({ $0.source == .m4g }),
+              isChordBurst(deleted) else { return }
+        let text = String(deleted.map(\.character))
+        guard let word = MultilingualWordProcessor.words(in: text).first?.text else { return }
+        pendingMisfires.append((word, Date()))
+    }
+
+    private func flushMisfires() async {
+        let misfires = pendingMisfires
+        pendingMisfires = []
+        for misfire in misfires {
+            try? await libraryService.recordMisfire(word: misfire.word, kind: .deleted, at: misfire.at)
         }
     }
 
@@ -169,6 +220,7 @@ public actor UsageRecorder {
     public func observeDelimiter(at timestamp: Date = .now) async {
         await finishWord(endedAt: timestamp)
         await commitPendingWord()
+        await flushMisfires()
         let keystrokes = pendingKeystrokes
         let backspaces = pendingBackspaces
         pendingKeystrokes = 0
@@ -264,18 +316,27 @@ public actor UsageRecorder {
                 endedAt: endedAt
             )
             await notePhraseWord(word, handTyped: false, joinsNext: joinsNext, at: endedAt)
-            wordObserver?(RecordedWord(word: word, source: .m4gHIDConfirmed, avgMs: avgMs, language: words[0].language))
+            let cycle = await noteSpeed(word: word, method: .m4gChords, endedAt: endedAt)
+            wordObserver?(RecordedWord(word: word, source: .m4gHIDConfirmed, avgMs: avgMs, language: words[0].language, cycleMs: cycle))
             return
         }
 
         guard characters.allSatisfy({ $0.source != .unknown }) else {
             previousWordJoinsNext = false
+            lastWordEndedAt = nil
             return
         }
         let source: UsageSource = characters.allSatisfy({ $0.source == .m4g })
             ? .m4gTyping
             : .keyboard
 
+        let cycle: Double?
+        if words.count == 1, let word = words.first?.text {
+            cycle = await noteSpeed(word: word, method: source == .m4gTyping ? .m4gLetters : .keyboard, endedAt: endedAt)
+        } else {
+            cycle = nil
+            lastWordEndedAt = endedAt
+        }
         for word in words {
             try? await libraryService.recordWordUsage(
                 word: word.text,
@@ -283,7 +344,7 @@ public actor UsageRecorder {
                 source: source,
                 lastUsedAt: endedAt
             )
-            wordObserver?(RecordedWord(word: word.text, source: source, avgMs: avgMs / Double(words.count), language: word.language))
+            wordObserver?(RecordedWord(word: word.text, source: source, avgMs: avgMs / Double(words.count), language: word.language, cycleMs: cycle))
         }
         if words.count == 1, let word = words.first?.text {
             await notePhraseWord(word, handTyped: true, joinsNext: joinsNext, at: endedAt)
@@ -291,6 +352,18 @@ public actor UsageRecorder {
             phraseRun = []
             previousWordJoinsNext = false
         }
+    }
+
+    /// Records a words-per-minute sample: the word plus its space, over the
+    /// time since the previous word ended. Pauses are left out.
+    private func noteSpeed(word: String, method: SpeedMethod, endedAt: Date) async -> Double? {
+        defer { lastWordEndedAt = endedAt }
+        guard let previous = lastWordEndedAt else { return nil }
+        let cycle = endedAt.timeIntervalSince(previous)
+        guard cycle > 0, cycle <= speedPauseLimit else { return nil }
+        let cycleMs = cycle * 1_000
+        try? await libraryService.recordSpeedSample(method: method, characters: word.count + 1, cycleMs: cycleMs, at: endedAt)
+        return cycleMs
     }
 
     /// Counts the two- and three-word phrases ending at this word.

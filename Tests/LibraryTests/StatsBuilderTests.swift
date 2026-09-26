@@ -98,4 +98,54 @@ final class StatsBuilderTests: XCTestCase {
         XCTAssertEqual(report.topUnchorded.first?.word, "zelvora")
         XCTAssertEqual(report.topUnchorded.first?.count, 10)
     }
+
+    func testSpeedAndErrorRatesPerMethod() {
+        var bucket = StatsBucket(start: Date())
+        bucket.chordedWords = 90
+        bucket.keyboardWords = 60
+        bucket.m4gTypedWords = 40
+        bucket.chordsUsed = 90
+        bucket.typoWords = 5
+        bucket.deletedMisfires = 6
+        bucket.garbledMisfires = 4
+        bucket.chordSpeedChars = 500
+        bucket.chordSpeedMs = 30_000
+        bucket.m4gLetterSpeedChars = 250
+        bucket.m4gLetterSpeedMs = 60_000
+        bucket.keyboardSpeedChars = 400
+        bucket.keyboardSpeedMs = 60_000
+
+        XCTAssertEqual(bucket.typoRate ?? 0, 0.05, accuracy: 0.0001)
+        XCTAssertEqual(bucket.misfireRate ?? 0, 10.0 / 96.0, accuracy: 0.0001)
+        XCTAssertEqual(bucket.errorRate ?? 0, 15.0 / 196.0, accuracy: 0.0001)
+        XCTAssertEqual(bucket.chordSpeedWPM ?? 0, 200, accuracy: 0.1)
+        XCTAssertEqual(bucket.m4gLetterSpeedWPM ?? 0, 50, accuracy: 0.1)
+        XCTAssertEqual(bucket.keyboardSpeedWPM ?? 0, 80, accuracy: 0.1)
+        XCTAssertEqual(bucket.m4gBlendedWPM ?? 0, 100, accuracy: 0.1)
+    }
+
+    func testGarbledChordBurstsAndSpeedRowsReachTheReport() {
+        let calendar = self.calendar
+        let report = StatsBuilder(period: .week, now: now, calendar: calendar).build(
+            wordRows: [row("2026-09-27", "the", .m4gHIDConfirmed, 20, ms: 5)],
+            chordRows: [(day: "2026-09-27", frequency: 20)],
+            addedChordDays: [],
+            keyRows: [],
+            chordedWords: ["the": ["t", "e"]],
+            typoWords: [],
+            mergedWords: [:],
+            speedRows: [(day: "2026-09-27", method: .m4gChords, characters: 100, ms: 6_000)],
+            misfireRows: [
+                (day: "2026-09-27", word: "the", kind: .deleted, frequency: 2),
+                (day: "2026-09-27", word: "tseh", kind: .garbled, frequency: 1)
+            ]
+        )
+
+        XCTAssertEqual(report.totals.chordSpeedWPM ?? 0, 200, accuracy: 0.1)
+        XCTAssertEqual(report.totals.misfires, 3)
+        XCTAssertEqual(report.topMisfires.first?.word, "the")
+        XCTAssertEqual(report.topMisfires.first?.chordInput, ["t", "e"])
+        XCTAssertNotNil(report.speedTrackingStart)
+    }
 }
+

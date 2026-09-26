@@ -1784,7 +1784,9 @@ extension LibraryService {
             attributionStartDay: try database.query(
                 "SELECT MIN(day) AS day FROM daily_word_stats WHERE source IN (?, ?)",
                 bindings: [.text(UsageSource.m4gHIDConfirmed.rawValue), .text(UsageSource.m4gTyping.rawValue)]
-            ).first?.string("day")
+            ).first?.string("day"),
+            speedRows: try speedRows(since: startDay),
+            misfireRows: try misfireRows(since: startDay, chordedWords: chordsByWord)
         )
     }
 
@@ -1939,6 +1941,20 @@ extension LibraryService {
             bindings: [.text(usageDay(for: now))]
         )
         var today = TodayUsage(day: now)
+        let todayKey = usageDay(for: now)
+        for sample in try speedRows(since: todayKey) where sample.day == todayKey {
+            switch sample.method {
+            case .keyboard:
+                today.speed.keyboardSpeedChars += sample.characters
+                today.speed.keyboardSpeedMs += sample.ms
+            case .m4gLetters:
+                today.speed.m4gLetterSpeedChars += sample.characters
+                today.speed.m4gLetterSpeedMs += sample.ms
+            case .m4gChords:
+                today.speed.chordSpeedChars += sample.characters
+                today.speed.chordSpeedMs += sample.ms
+            }
+        }
         for row in rows {
             guard let word = row.string("word"),
                   let source = row.string("source").flatMap(UsageSource.init(rawValue:)),
@@ -2037,6 +2053,99 @@ extension LibraryService {
             .sorted { $0.typedFrequency > $1.typedFrequency }
             .prefix(300)
             .map(\.word)
+    }
+}
+
+// MARK: - Speed and misfires
+
+extension LibraryService {
+    public func recordSpeedSample(method: SpeedMethod, characters: Int, cycleMs: Double, at date: Date = .now) throws {
+        try database.execute(
+            """
+            INSERT INTO daily_speed_stats (day, method, words, characters, cycle_ms)
+            VALUES (?, ?, 1, ?, ?)
+            ON CONFLICT(day, method) DO UPDATE SET
+                words = words + 1,
+                characters = characters + excluded.characters,
+                cycle_ms = cycle_ms + excluded.cycle_ms
+            """,
+            bindings: [.text(usageDay(for: date)), .text(method.rawValue), .integer(Int64(characters)), .double(cycleMs)]
+        )
+    }
+
+    public func recordMisfire(word: String, kind: MisfireKind, at date: Date = .now) throws {
+        let normalized = MultilingualWordProcessor.normalize(word)?.text ?? word.lowercased()
+        guard !normalized.isEmpty else { return }
+        try database.execute(
+            """
+            INSERT INTO daily_misfire_stats (day, word, kind, frequency)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(day, word, kind) DO UPDATE SET frequency = frequency + 1
+            """,
+            bindings: [.text(usageDay(for: date)), .text(normalized), .text(kind.rawValue)]
+        )
+    }
+}
+
+extension LibraryService {
+    fileprivate func speedRows(since startDay: String) throws -> [(day: String, method: SpeedMethod, characters: Int, ms: Double)] {
+        try database.query(
+            "SELECT day, method, characters, cycle_ms FROM daily_speed_stats WHERE day >= ?",
+            bindings: [.text(startDay)]
+        ).compactMap { row in
+            guard let day = row.string("day"),
+                  let method = row.string("method").flatMap(SpeedMethod.init(rawValue:)),
+                  let characters = row.integer("characters"),
+                  let ms = row.double("cycle_ms") else { return nil }
+            return (day, method, Int(characters), ms)
+        }
+    }
+
+    /// Recorded deletions, plus chord-speed output that is neither a chord
+    /// output nor a real word: letters that came out when a chord failed.
+    fileprivate func misfireRows(
+        since startDay: String,
+        chordedWords: [String: [ChordEntry]]
+    ) throws -> [(day: String, word: String, kind: MisfireKind, frequency: Int)] {
+        var rows = try database.query(
+            "SELECT day, word, kind, frequency FROM daily_misfire_stats WHERE day >= ?",
+            bindings: [.text(startDay)]
+        ).compactMap { row -> (day: String, word: String, kind: MisfireKind, frequency: Int)? in
+            guard let day = row.string("day"),
+                  let word = row.string("word"),
+                  let kind = row.string("kind").flatMap(MisfireKind.init(rawValue:)),
+                  let frequency = row.integer("frequency") else { return nil }
+            return (day, word, kind, Int(frequency))
+        }
+
+        let bursts = try database.query(
+            """
+            SELECT day, lower(output) AS output, SUM(frequency) AS frequency
+            FROM daily_chord_stats
+            WHERE day >= ? AND confidence = ?
+            GROUP BY day, lower(output)
+            """,
+            bindings: [.text(startDay), .text(ChordUsageConfidence.chordBurst.rawValue)]
+        )
+        guard !bursts.isEmpty else { return rows }
+        let dictionary = GrowthPlanner.loadSystemDictionary()
+        let aliases = try wordAliases()
+        let morphology = EnglishMorphologyIndex.bundled
+        for row in bursts {
+            guard let day = row.string("day"),
+                  let output = row.string("output"),
+                  let frequency = row.integer("frequency") else { continue }
+            let isKnown = dictionary.contains(output)
+                || chordedWords[output] != nil
+                || aliases[output] != nil
+                // A chord plus a suffix modifier (`going`) is a real word form.
+                || morphology.matches(for: output).contains { chordedWords[$0.lemma] != nil }
+            // Two-letter outputs are too often abbreviations (`ui`) to judge.
+            if !isKnown, output.count >= 3 {
+                rows.append((day, output, .garbled, Int(frequency)))
+            }
+        }
+        return rows
     }
 }
 

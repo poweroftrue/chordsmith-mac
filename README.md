@@ -97,6 +97,17 @@ to VoiceOver and Audio Graphs.
 Chord measures start on the first day the recorder could tell chords from
 typing, so earlier days never read as zero percent chorded.
 
+**Speed** groups words per minute by input method: other keyboards letter by
+letter, and on the Master Forge chorded, letter by letter and blended. Each
+word and its space is timed from the end of the previous word, with pauses
+over three seconds left out (1 word = 5 characters).
+
+**Accuracy** keeps typos and chord misfires apart because they have different
+fixes. Typos are counted per 100 words typed by hand. A misfire is a chord
+whose output you delete straight away (not a device modifier replacing its
+own output), or chord-speed letters that match no chord and no word; the
+most-misfired chords link to Advisor to find a more reliable chord.
+
 ## Advisor
 
 The advisor is local and deterministic. It uses:
