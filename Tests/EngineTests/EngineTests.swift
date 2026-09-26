@@ -396,11 +396,125 @@ final class EngineTests: XCTestCase {
             startedAt: start,
             endedAt: start.addingTimeInterval(1)
         )
+        await recorder.flush()
 
         let words = try await library.dailyWordUsage(days: 1, limit: 10)
         let arabic = try XCTUnwrap(words.first { $0.word == "مرحبا" })
         XCTAssertEqual(arabic.frequency, 2)
         XCTAssertEqual(arabic.language, .arabic)
+    }
+
+    func testEventClockNormalizesMachTicksAndNanoseconds() {
+        let numer: UInt64 = 125
+        let denom: UInt64 = 3
+        let now: UInt64 = 528_550_740_000_000
+        let fiveMillisecondsAgo = now - 5_000_000
+
+        // Keyboard events at the HID tap on Apple silicon carry mach ticks.
+        let ticks = fiveMillisecondsAgo * denom / numer
+        let fromTicks = EventClock.uptimeNanoseconds(forEventTimestamp: ticks, now: now, numer: numer, denom: denom)
+        XCTAssertLessThan(max(fromTicks, fiveMillisecondsAgo) - min(fromTicks, fiveMillisecondsAgo), 1_000)
+
+        // Other events carry nanoseconds already.
+        XCTAssertEqual(
+            EventClock.uptimeNanoseconds(forEventTimestamp: fiveMillisecondsAgo, now: now, numer: numer, denom: denom),
+            fiveMillisecondsAgo
+        )
+        // Synthetic events have no timestamp; implausible values fall back to now.
+        XCTAssertEqual(EventClock.uptimeNanoseconds(forEventTimestamp: 0, now: now, numer: numer, denom: denom), now)
+        XCTAssertEqual(EventClock.uptimeNanoseconds(forEventTimestamp: 42, now: now, numer: numer, denom: denom), now)
+    }
+
+    func testHIDCorrelatorMatchesAfterNormalizingTickTimestamps() {
+        var correlator = HIDInputCorrelator()
+        let hidNanoseconds = EventClock.nanoseconds(fromMachTicks: 12_685_217_723_043)
+        correlator.record(HIDKeySample(timestampNanoseconds: hidNanoseconds, virtualKeyCode: 17, source: .m4g))
+
+        let keyEventTicks: UInt64 = 12_685_217_768_310
+        let normalized = EventClock.uptimeNanoseconds(
+            forEventTimestamp: keyEventTicks,
+            now: EventClock.nanoseconds(fromMachTicks: keyEventTicks + 1_000),
+            numer: 125,
+            denom: 3
+        )
+        XCTAssertEqual(correlator.source(for: normalized, virtualKeyCode: 17), .m4g)
+    }
+
+    func testUsageRecorderReopensWordWhenSuffixModifierDeletesTheSpace() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let recorder = TypingRecorder(libraryService: library)
+        let start = Date()
+
+        // Chord "go", then a CCOS -ing modifier: backspace the space, append "ing ".
+        await recorder.observeKeyboardText("go ", source: .m4g, startedAt: start, endedAt: start.addingTimeInterval(0.006))
+        await recorder.observeBackspace()
+        await recorder.observeKeyboardText("ing ", source: .m4g, startedAt: start.addingTimeInterval(0.2), endedAt: start.addingTimeInterval(0.208))
+        await recorder.flush()
+
+        let words = try await library.dailyWordUsage(days: 1, limit: 10)
+        XCTAssertEqual(words.map(\.word), ["going"])
+        XCTAssertEqual(words.first?.source, .m4gHIDConfirmed)
+        let chords = try await library.dailyChordUsage(days: 1, limit: 10)
+        XCTAssertEqual(chords.first?.output, "going")
+        XCTAssertEqual(chords.first?.confidence, .chordBurst)
+    }
+
+    func testUsageRecorderCountsTheCorrectedWordAfterBackspacingIntoIt() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let recorder = TypingRecorder(libraryService: library)
+        let start = Date()
+
+        await recorder.observeKeyboardText("teh ", startedAt: start, endedAt: start.addingTimeInterval(0.4))
+        await recorder.observeBackspace()
+        await recorder.observeBackspace()
+        await recorder.observeBackspace()
+        await recorder.observeKeyboardText("he ", startedAt: start.addingTimeInterval(0.8), endedAt: start.addingTimeInterval(1.0))
+        await recorder.flush()
+
+        let words = try await library.dailyWordUsage(days: 1, limit: 10)
+        XCTAssertEqual(words.map(\.word), ["the"])
+    }
+
+    func testUsageRecorderDeleteWordDiscardsTheFinishedWord() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let recorder = TypingRecorder(libraryService: library)
+        let start = Date()
+
+        await recorder.observeKeyboardText("oops ", startedAt: start, endedAt: start.addingTimeInterval(0.4))
+        await recorder.observeDeleteWord()
+        await recorder.observeKeyboardText("fine ", startedAt: start.addingTimeInterval(0.6), endedAt: start.addingTimeInterval(0.9))
+        await recorder.flush()
+
+        let words = try await library.dailyWordUsage(days: 1, limit: 10)
+        XCTAssertEqual(words.map(\.word), ["fine"])
+    }
+
+    func testUsageRecorderDoesNotTreatManualTypingAfterAChordAsAChordBurst() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let recorder = TypingRecorder(libraryService: library)
+        let start = Date()
+
+        await recorder.observeKeyboardText("go", source: .m4g, startedAt: start, endedAt: start.addingTimeInterval(0.004))
+        await recorder.observeKeyboardText("i", source: .m4g, startedAt: start.addingTimeInterval(0.2), endedAt: start.addingTimeInterval(0.2))
+        await recorder.observeKeyboardText("n", source: .m4g, startedAt: start.addingTimeInterval(0.3), endedAt: start.addingTimeInterval(0.3))
+        await recorder.observeKeyboardText("g", source: .m4g, startedAt: start.addingTimeInterval(0.4), endedAt: start.addingTimeInterval(0.4))
+        await recorder.flush()
+
+        let words = try await library.dailyWordUsage(days: 1, limit: 10)
+        XCTAssertEqual(words.first?.word, "going")
+        XCTAssertEqual(words.first?.source, .m4gTyping)
     }
 
     func testSoftwareChordPhraseRecordsIndividualMultilingualWords() async throws {

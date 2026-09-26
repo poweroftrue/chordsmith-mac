@@ -10,13 +10,24 @@ public actor UsageRecorder {
         let source: PhysicalInputSource
     }
 
+    /// The last finished word, held back until the next word starts so that
+    /// deleting its trailing delimiter can reopen it. CCOS suffix modifiers do
+    /// exactly this (`go ` + backspace + `ing `), and so do quick typo fixes.
+    private struct PendingWord {
+        let characters: [BufferedCharacter]
+        let endedAt: Date
+        var trailingDelimiters: Int
+    }
+
     private let libraryService: LibraryService
     private var buffer: [BufferedCharacter] = []
+    private var pendingWord: PendingWord?
     private var deviceChordsByOutput: [String: [ChordEntry]] = [:]
     private var idleFlushTask: Task<Void, Never>?
 
     private let newWordThreshold: TimeInterval = 5.0
-    private let chordBurstAverageInterval: TimeInterval = 0.015
+    /// Upper bound for the gap between characters of one chord output.
+    private let chordBurstInterval: TimeInterval = 0.02
 
     public init(libraryService: LibraryService) {
         self.libraryService = libraryService
@@ -54,7 +65,10 @@ public actor UsageRecorder {
             if continuesWord {
                 if let last = buffer.last,
                    timestamp.timeIntervalSince(last.timestamp) > newWordThreshold {
-                    await flushBuffer(endedAt: last.timestamp)
+                    await finishWord(endedAt: last.timestamp)
+                }
+                if buffer.isEmpty {
+                    await commitPendingWord()
                 }
                 buffer.append(
                     BufferedCharacter(
@@ -63,18 +77,29 @@ public actor UsageRecorder {
                         source: source
                     )
                 )
-                scheduleIdleFlush()
-            } else {
-                await flushBuffer(endedAt: timestamp)
+            } else if !buffer.isEmpty {
+                await finishWord(endedAt: timestamp)
+                pendingWord?.trailingDelimiters += 1
+            } else if pendingWord != nil {
+                pendingWord?.trailingDelimiters += 1
             }
+            scheduleIdleFlush()
         }
     }
 
     public func observeBackspace() {
         if !buffer.isEmpty {
             buffer.removeLast()
+        } else if var pending = pendingWord {
+            pending.trailingDelimiters -= 1
+            if pending.trailingDelimiters <= 0 {
+                buffer = pending.characters
+                pendingWord = nil
+            } else {
+                pendingWord = pending
+            }
         }
-        if buffer.isEmpty {
+        if buffer.isEmpty && pendingWord == nil {
             idleFlushTask?.cancel()
             idleFlushTask = nil
         } else {
@@ -82,8 +107,30 @@ public actor UsageRecorder {
         }
     }
 
+    /// Option+Backspace: the word being typed, or the word just finished, is
+    /// gone and must not be counted.
+    public func observeDeleteWord() {
+        if !buffer.isEmpty {
+            buffer.removeAll()
+        } else {
+            pendingWord = nil
+        }
+    }
+
+    /// Command+Backspace: everything uncommitted on the line is gone.
+    public func observeDeleteLine() {
+        buffer.removeAll()
+        pendingWord = nil
+        idleFlushTask?.cancel()
+        idleFlushTask = nil
+    }
+
+    /// A hard boundary (Return, Tab, a shortcut, a click, cursor movement):
+    /// finish and persist everything, because backspace can no longer be
+    /// trusted to edit the previous word.
     public func observeDelimiter(at timestamp: Date = .now) async {
-        await flushBuffer(endedAt: timestamp)
+        await finishWord(endedAt: timestamp)
+        await commitPendingWord()
     }
 
     public func recordLiteralText(_ text: String, startedAt: Date, endedAt: Date) async {
@@ -115,17 +162,29 @@ public actor UsageRecorder {
     }
 
     public func flush() async {
-        await flushBuffer(endedAt: .now)
+        await observeDelimiter(at: .now)
     }
 
-    private func flushBuffer(endedAt: Date) async {
-        idleFlushTask?.cancel()
-        idleFlushTask = nil
-
-        let rawText = String(buffer.map(\.character))
-        let characters = buffer
+    private func finishWord(endedAt: Date) async {
+        guard !buffer.isEmpty else { return }
+        // Swap state before suspending so a concurrent idle flush cannot
+        // persist the same characters twice.
+        let previous = pendingWord
+        pendingWord = PendingWord(characters: buffer, endedAt: endedAt, trailingDelimiters: 0)
         buffer = []
+        if let previous {
+            await persist(previous.characters, endedAt: previous.endedAt)
+        }
+    }
 
+    private func commitPendingWord() async {
+        guard let pending = pendingWord else { return }
+        pendingWord = nil
+        await persist(pending.characters, endedAt: pending.endedAt)
+    }
+
+    private func persist(_ characters: [BufferedCharacter], endedAt: Date) async {
+        let rawText = String(characters.map(\.character))
         let words = MultilingualWordProcessor.words(in: rawText)
         guard !words.isEmpty else { return }
         let startedAt = characters.first?.timestamp ?? endedAt
@@ -197,27 +256,31 @@ public actor UsageRecorder {
         for word: String,
         characters: [BufferedCharacter]
     ) -> (matchedChordId: UUID?, confidence: ChordUsageConfidence, ambiguityCount: Int)? {
-        guard let matches = deviceChordsByOutput[word],
-              !matches.isEmpty,
-              characters.allSatisfy({ $0.source == .m4g }),
-              isFastBurst(characters) else {
+        guard characters.allSatisfy({ $0.source == .m4g }),
+              isChordBurst(characters) else {
             return nil
         }
 
+        guard let matches = deviceChordsByOutput[word], !matches.isEmpty else {
+            return (nil, .chordBurst, 0)
+        }
         if matches.count == 1 {
             return (matches[0].id, .confirmedHardware, 0)
         }
         return (nil, .ambiguousOutput, matches.count)
     }
 
-    private func isFastBurst(_ characters: [BufferedCharacter]) -> Bool {
-        guard characters.count >= 2,
-              let first = characters.first?.timestamp,
-              let last = characters.last?.timestamp else {
-            return false
+    /// Chord output arrives a few milliseconds per character, far faster than
+    /// anyone types. One slower seam is allowed so a chord finished by a suffix
+    /// modifier still counts as chorded.
+    private func isChordBurst(_ characters: [BufferedCharacter]) -> Bool {
+        guard characters.count >= 2 else { return false }
+        let intervals = zip(characters.dropFirst(), characters).map { next, previous in
+            next.timestamp.timeIntervalSince(previous.timestamp)
         }
-        let averageInterval = last.timeIntervalSince(first) / Double(max(characters.count - 1, 1))
-        return averageInterval <= chordBurstAverageInterval
+        let slow = intervals.filter { $0 > chordBurstInterval }.count
+        let fast = intervals.count - slow
+        return slow == 0 || (slow == 1 && fast >= 2)
     }
 
     private func scheduleIdleFlush() {

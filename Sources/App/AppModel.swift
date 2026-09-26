@@ -10,7 +10,8 @@ enum PanelTab: String, CaseIterable, Identifiable {
     case advisor
     case add
     case staged
-    case suggestions
+    case grow
+    case practice
     case usage
 
     var id: String { rawValue }
@@ -118,6 +119,15 @@ final class AppModel: ObservableObject {
     @Published var wordCoverageReport = WordCoverageReport.empty
     @Published var usageLanguageFilter: WordLanguage? = nil
     @Published var usageCoverageDays: Int? = 30
+    @Published private(set) var growthPlan = GrowthPlan.empty
+    @Published private(set) var isPlanningGrowth = false
+    @Published private(set) var hasLoadedGrowthPlan = false
+    /// Candidate index chosen per word in the growth plan (0 = best).
+    @Published var growthCandidateChoice: [String: Int] = [:]
+    @Published var growthSelection: Set<String> = []
+    @Published var growthWindowDays = 30
+    @Published private(set) var practiceReport = PracticeReport.empty
+    @Published private(set) var hasLoadedPracticeReport = false
 
     let libraryService: LibraryService
     let deviceService: any AppDeviceService
@@ -311,9 +321,38 @@ final class AppModel: ObservableObject {
     }
 
     func addChord(input: String, output: String, profile: ErgonomicProfile, deploymentTarget: DeploymentTarget, enabled: Bool = true, source: String = "user") async {
+        if Self.isDeviceTarget(deploymentTarget) {
+            await addChord(
+                tokens: ChordInputValidator.tokens(from: input),
+                output: output,
+                profile: profile,
+                deploymentTarget: deploymentTarget,
+                enabled: enabled,
+                source: source
+            )
+            return
+        }
+        await addChord(
+            tokens: input
+                .replacingOccurrences(of: "+", with: ",")
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { !$0.isEmpty },
+            output: output,
+            profile: profile,
+            deploymentTarget: deploymentTarget,
+            enabled: enabled,
+            source: source
+        )
+    }
+
+    /// Stages a chord from exact key tokens. Advisor candidates must use this:
+    /// joining tokens into text and re-parsing drops the `,` key.
+    func addChord(tokens inputTokens: [String], output: String, profile: ErgonomicProfile, deploymentTarget: DeploymentTarget, enabled: Bool = true, source: String = "user") async {
         let tokens: [String]
         if Self.isDeviceTarget(deploymentTarget) {
-            let validation = ChordInputValidator.validateM4GDeviceInput(input, existingChords: chords)
+            let knownChords = chords + stagedChanges.filter { $0.kind == .upsert }.map(\.chord)
+            let validation = ChordInputValidator.validateM4GDeviceTokens(inputTokens, existingChords: knownChords)
             guard validation.isValid else {
                 lastError = validation.errors.joined(separator: "\n")
                 statusText = "Chord input rejected"
@@ -321,11 +360,7 @@ final class AppModel: ObservableObject {
             }
             tokens = validation.tokens
         } else {
-            tokens = input
-                .replacingOccurrences(of: "+", with: ",")
-                .split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-                .filter { !$0.isEmpty }
+            tokens = inputTokens
         }
 
         guard !tokens.isEmpty, !output.isEmpty else {
@@ -350,8 +385,7 @@ final class AppModel: ObservableObject {
     func commitStagedChanges() async {
         guard !stagedChanges.isEmpty else { return }
         let changes = stagedChanges
-        let shouldRefreshSuggestions = selectedTab == .suggestions &&
-            (suggestionProfile == .cc2A1 || suggestionProfile == activeSoftwareProfile)
+        let shouldRefreshSuggestions = false
         _ = await commitChanges(
             changes,
             clearStagedChangesOnLocalCommit: true,
@@ -549,6 +583,7 @@ final class AppModel: ObservableObject {
                 _ = try await libraryService.regenerateSuggestions(profile: suggestionProfile)
             }
             await refresh()
+            await refreshGrowthViewsIfLoaded()
             guard hasDeviceChanges else {
                 statusText = localOnlyStatus
                 return true
@@ -586,6 +621,165 @@ final class AppModel: ObservableObject {
         statusText = "Removed staged change: \(removed.summary)"
     }
 
+    func removeStagedChange(_ change: StagedChordChange) {
+        stagedChanges.removeAll { $0.id == change.id }
+        statusText = "Removed staged change: \(change.summary)"
+    }
+
+    func clearStagedChanges() {
+        let count = stagedChanges.count
+        stagedChanges.removeAll()
+        statusText = "Cleared \(count) staged change\(count == 1 ? "" : "s")"
+    }
+
+    // MARK: Grow
+
+    func loadGrowthPlan() async {
+        guard !isPlanningGrowth else { return }
+        isPlanningGrowth = true
+        defer { isPlanningGrowth = false }
+        do {
+            let plan = try await libraryService.growthPlan(profile: .cc2A1, days: growthWindowDays, limit: 120)
+            growthPlan = plan
+            hasLoadedGrowthPlan = true
+            let words = Set(plan.items.map(\.word))
+            growthSelection.formIntersection(words)
+            growthCandidateChoice = growthCandidateChoice.filter { words.contains($0.key) }
+        } catch {
+            lastError = error.localizedDescription
+            statusText = "Could not build the growth plan"
+        }
+    }
+
+    func setGrowthWindowDays(_ days: Int) {
+        growthWindowDays = days
+        Task { await loadGrowthPlan() }
+    }
+
+    func chosenCandidate(for item: GrowthItem) -> Candidate? {
+        let index = growthCandidateChoice[item.word] ?? 0
+        return item.candidates.indices.contains(index) ? item.candidates[index] : item.candidates.first
+    }
+
+    func toggleGrowthSelection(_ item: GrowthItem) {
+        if growthSelection.contains(item.word) {
+            growthSelection.remove(item.word)
+        } else {
+            growthSelection.insert(item.word)
+        }
+    }
+
+    func selectTopGrowthItems(_ count: Int) {
+        let staged = stagedOutputs()
+        growthSelection = Set(
+            growthPlan.items
+                .filter { !staged.contains($0.word) }
+                .prefix(count)
+                .map(\.word)
+        )
+    }
+
+    /// Stages every selected word with its chosen chord. Each input is
+    /// validated against the library and against chords staged before it, so
+    /// the batch commits to the M4G without collisions.
+    func stageSelectedGrowthItems() {
+        let items = growthPlan.items.filter { growthSelection.contains($0.word) }
+        guard !items.isEmpty else { return }
+
+        var accepted: [String] = []
+        var rejected: [String] = []
+        for item in items {
+            guard let candidate = chosenCandidate(for: item) else { continue }
+            let knownChords = chords + stagedChanges.filter { $0.kind == .upsert }.map(\.chord)
+            let validation = ChordInputValidator.validateM4GDeviceTokens(
+                candidate.inputKeys,
+                existingChords: knownChords
+            )
+            guard validation.isValid else {
+                rejected.append("\(item.word): \(validation.errors.first ?? "invalid input")")
+                continue
+            }
+            let chord = ChordEntry(
+                inputKeys: validation.tokens,
+                output: item.word,
+                profile: .cc2A1,
+                deploymentTarget: .device,
+                source: "grow"
+            )
+            stagedChanges.append(StagedChordChange(kind: .upsert, chord: chord))
+            accepted.append(item.word)
+        }
+        growthSelection.subtract(accepted)
+        if !rejected.isEmpty {
+            lastError = "Some chords were not staged:\n" + rejected.joined(separator: "\n")
+        }
+        statusText = "Staged \(accepted.count) chord\(accepted.count == 1 ? "" : "s"). Review, then Commit."
+    }
+
+    func skipGrowthWord(_ item: GrowthItem) async {
+        do {
+            try await libraryService.setGrowthWordSkipped(item.word, skipped: true)
+            growthSelection.remove(item.word)
+            statusText = "Skipped \(item.word). It will not be suggested again."
+            await loadGrowthPlan()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func unskipGrowthWord(_ word: String) async {
+        do {
+            try await libraryService.setGrowthWordSkipped(word, skipped: false)
+            await loadGrowthPlan()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func stagedOutputs() -> Set<String> {
+        Set(stagedChanges.filter { $0.kind == .upsert }.map { ($0.chord.plainOutput ?? $0.chord.output).lowercased() })
+    }
+
+    // MARK: Practice
+
+    func loadPracticeReport() async {
+        do {
+            practiceReport = try await libraryService.practiceReport(days: 7, learningDays: 30)
+            hasLoadedPracticeReport = true
+        } catch {
+            lastError = error.localizedDescription
+            statusText = "Could not build the practice report"
+        }
+    }
+
+    func setChordLearned(_ chord: ChordEntry, learned: Bool) async {
+        do {
+            try await libraryService.setChordLearned(id: chord.id, learned: learned)
+            await loadPracticeReport()
+            statusText = learned ? "Marked \(chord.output) as learned" : "Moved \(chord.output) back to learning"
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func refreshGrowthViewsIfLoaded() async {
+        if hasLoadedGrowthPlan {
+            await loadGrowthPlan()
+        }
+        if hasLoadedPracticeReport {
+            await loadPracticeReport()
+        }
+    }
+
+    func openSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        if #available(macOS 14, *) {
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        } else {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+        }
+    }
+
     func deleteChord(_ chord: ChordEntry) async {
         stagedChanges.append(StagedChordChange(kind: .delete, chord: chord))
         statusText = "Staged delete \(chord.normalizedInput)"
@@ -608,7 +802,7 @@ final class AppModel: ObservableObject {
 
     func acceptSuggestion(_ suggestion: Suggestion, candidate: Candidate, target: DeploymentTarget) async {
         await addChord(
-            input: candidate.inputKeys.joined(separator: ","),
+            tokens: candidate.inputKeys,
             output: suggestion.word,
             profile: suggestion.profile,
             deploymentTarget: target,
@@ -686,7 +880,7 @@ final class AppModel: ObservableObject {
     func acceptAdvisorCandidate(_ candidate: Candidate, word: String) async {
         let output = word.trimmingCharacters(in: .whitespacesAndNewlines)
         await addChord(
-            input: candidate.inputKeys.joined(separator: ","),
+            tokens: candidate.inputKeys,
             output: output,
             profile: .cc2A1,
             deploymentTarget: .device,

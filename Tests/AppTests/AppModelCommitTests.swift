@@ -57,6 +57,49 @@ final class AppModelCommitTests: XCTestCase {
         })
     }
 
+    func testGrowthBatchStagesSelectedWordsAndCommitsOneDeviceBatch() async throws {
+        let fixture = try AppModelFixture()
+        for (word, count) in [("gazebo", 40), ("lantern", 30), ("quartz", 20)] {
+            try await fixture.library.recordWordUsage(word: word, avgMs: 900, source: .keyboard, frequencyDelta: count)
+        }
+        await fixture.model.loadGrowthPlan()
+        XCTAssertEqual(fixture.model.growthPlan.items.map(\.word), ["gazebo", "lantern", "quartz"])
+
+        fixture.model.selectTopGrowthItems(2)
+        fixture.model.stageSelectedGrowthItems()
+
+        XCTAssertEqual(fixture.model.stagedChanges.map(\.chord.output), ["gazebo", "lantern"])
+        XCTAssertTrue(fixture.model.stagedChanges.allSatisfy { $0.chord.source == "grow" && $0.chord.deploymentTarget == .device })
+        XCTAssertTrue(fixture.model.growthSelection.isEmpty)
+
+        await fixture.model.commitStagedChanges()
+
+        let batches = fixture.device.appliedMutationBatches()
+        XCTAssertEqual(batches.count, 1)
+        XCTAssertEqual(batches.first?.count, 2)
+        XCTAssertEqual(fixture.model.growthPlan.items.map(\.word), ["quartz"])
+    }
+
+    func testAcceptingAdvisorCandidateKeepsTheCommaKey() async throws {
+        let fixture = try AppModelFixture()
+        await fixture.model.acceptAdvisorCandidate(
+            Candidate(inputKeys: [",", "g", "o"], score: 100, hardFailures: [], softReasons: []),
+            word: "goo"
+        )
+
+        XCTAssertEqual(fixture.model.stagedChanges.first?.chord.inputKeys, [",", "g", "o"])
+    }
+
+    func testRemovingOneStagedChangeKeepsTheOthers() async throws {
+        let fixture = try AppModelFixture()
+        await fixture.model.addChord(input: "t,r,h", output: "there", profile: .cc2A1, deploymentTarget: .device)
+        await fixture.model.addChord(input: "w,h,r", output: "where", profile: .cc2A1, deploymentTarget: .device)
+
+        fixture.model.removeStagedChange(fixture.model.stagedChanges[0])
+
+        XCTAssertEqual(fixture.model.stagedChanges.map(\.chord.output), ["where"])
+    }
+
     func testSoftwareOnlyCommitDoesNotWriteDevice() async throws {
         let fixture = try AppModelFixture()
         await fixture.model.addChord(

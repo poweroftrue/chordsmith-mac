@@ -21,6 +21,32 @@ It is built for fast local search, quick chord editing, M4G-aware suggestions, a
 - Commit staged device changes directly to the connected M4G.
 - Queue failed device writes for later retry instead of freezing the UI.
 
+## Grow: Add Chords In Batches
+
+The **Grow** tab ranks the words that cost you the most time typed letter by
+letter over the last 7, 30 or 90 days, and gives each one a chord. Every first
+choice is conflict-free against your library and against the words ranked
+above it, so you can select the top 5, 10 or 25, stage them in one go, check
+them in **Staged**, and commit them to the M4G as a single batch.
+
+- Inflections of words you already chord (`running` from `run`) are shown as
+  endings and get the base chord plus one marker key.
+- Likely typos of chorded words (`hte`, `waht`), half-typed fragments finished
+  by shell completion, and Arabic words are kept out of the list.
+- Skip a word to stop it being suggested; restore it from the Skipped section.
+
+## Practice
+
+The **Practice** tab turns the recorder's data into drills:
+
+- **You have a chord but typed it**: words with a chord that you still type
+  letter by letter, with how often you chorded them instead.
+- **New chords to adopt**: chords added from Chordsmith in the last 30 days,
+  until you mark them learned.
+- **Typos a chord would have prevented**.
+- **Drills** of five words at a time: chord each word into the field, see your
+  time and chords per minute, repeat with the chord hidden, then move on.
+
 ## Advisor
 
 The advisor is local and deterministic. It uses:
@@ -98,6 +124,11 @@ swift test
 Chordsmith Mac stores local app data under macOS Application Support. The advisor runs locally and does not require an AI service or network access for chord generation.
 
 The usage recorder requires macOS Input Monitoring permission. A Master Forge is one logical device made from separately enumerated left (`m4g_s3`) and right (`m4gr_s3`) digitizer halves. Chordsmith recognizes both halves by their USB HID descriptor and correlates each half's key-down with the corresponding macOS keyboard event. Unmatched events are recorded as normal keyboard input; if physical attribution is unavailable, the recorder does not save the word. The Usage tab shows whether one or both Master Forge halves are available for physical attribution.
+
+Words stay editable until the next word starts: backspacing into a word you
+just finished (as CCOS suffix modifiers and quick typo fixes do) reopens it, and
+Option+Backspace discards it, so only the final word is counted. Clicks, arrow
+keys, Return and shortcuts end the word.
 
 Word detection uses Apple's on-device Natural Language tokenizer and Unicode normalization for English and Arabic. Arabic tashkeel and tatweel are removed from aggregate keys so visually equivalent spellings count together. Only normalized word-level frequency, timing, language, and source aggregates are stored; raw keystrokes, sentences, and application names are not persisted. SQLite runs in WAL mode with normal synchronization to minimize write overhead for an always-on recorder.
 

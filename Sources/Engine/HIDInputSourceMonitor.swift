@@ -276,7 +276,7 @@ public final class HIDInputSourceMonitor: @unchecked Sendable {
 
         guard let virtualKeyCode = virtualKeyCode(forHIDUsage: usage) else { return nil }
         return HIDKeySample(
-            timestampNanoseconds: nanoseconds(fromMachAbsoluteTime: IOHIDValueGetTimeStamp(value)),
+            timestampNanoseconds: EventClock.nanoseconds(fromMachTicks: IOHIDValueGetTimeStamp(value)),
             virtualKeyCode: virtualKeyCode,
             source: .m4g
         )
@@ -316,14 +316,6 @@ public final class HIDInputSourceMonitor: @unchecked Sendable {
 
     private static func integerProperty(_ key: String, from device: IOHIDDevice) -> Int? {
         (IOHIDDeviceGetProperty(device, key as CFString) as? NSNumber)?.intValue
-    }
-
-    private static func nanoseconds(fromMachAbsoluteTime timestamp: UInt64) -> UInt64 {
-        var timebase = mach_timebase_info_data_t()
-        mach_timebase_info(&timebase)
-        let numerator = UInt64(timebase.numer)
-        let denominator = UInt64(timebase.denom)
-        return (timestamp / denominator) * numerator + ((timestamp % denominator) * numerator) / denominator
     }
 
     private static let hidUsageToVirtualKeyCode: [UInt32: CGKeyCode] = [

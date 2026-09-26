@@ -9,16 +9,25 @@ public final class InputObservationEngine: ObservableObject {
     @Published public private(set) var isRunning = false
     @Published public private(set) var needsInputMonitoringPermission = false
     @Published public private(set) var attributionStatusText = "Physical M4G detection stopped"
+    /// Keys matched to the Master Forge's own HID reports since the recorder
+    /// started, versus keys from any other keyboard. A running Forge with zero
+    /// matched keys means attribution is broken, not that you never chord.
+    @Published public private(set) var m4gAttributedKeyCount = 0
+    @Published public private(set) var otherKeyboardKeyCount = 0
 
     private enum PendingRecorderEvent: Sendable {
-        case text(String, keyCode: CGKeyCode, eventTimestamp: UInt64, capturedAt: Date)
+        case text(String, keyCode: CGKeyCode, eventUptimeNanoseconds: UInt64, capturedAt: Date)
         case backspace
+        case deleteWord
+        case deleteLine
         case delimiter(Date)
     }
 
     private enum ResolvedRecorderEvent: Sendable {
         case text(String, source: PhysicalInputSource, capturedAt: Date)
         case backspace
+        case deleteWord
+        case deleteLine
         case delimiter(Date)
         case flush
     }
@@ -51,7 +60,10 @@ public final class InputObservationEngine: ObservableObject {
         needsInputMonitoringPermission = false
         attributionStatusText = inputSourceStatus.displayText
 
-        let mask = 1 << CGEventType.keyDown.rawValue
+        // Clicks move the cursor, so they end the word being tracked.
+        let mask = (1 << CGEventType.keyDown.rawValue)
+            | (1 << CGEventType.leftMouseDown.rawValue)
+            | (1 << CGEventType.rightMouseDown.rawValue)
         let callback: CGEventTapCallBack = { proxy, type, event, refcon in
             guard let refcon else { return Unmanaged.passUnretained(event) }
             let engine = Unmanaged<InputObservationEngine>.fromOpaque(refcon).takeUnretainedValue()
@@ -109,6 +121,11 @@ public final class InputObservationEngine: ObservableObject {
             return Unmanaged.passUnretained(event)
         }
 
+        if type == .leftMouseDown || type == .rightMouseDown {
+            enqueue(.delimiter(.now))
+            return Unmanaged.passUnretained(event)
+        }
+
         guard type == .keyDown else {
             return Unmanaged.passUnretained(event)
         }
@@ -125,10 +142,18 @@ public final class InputObservationEngine: ObservableObject {
 
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
         switch Int(keyCode) {
-        case kVK_Delete, kVK_ForwardDelete:
-            enqueue(.backspace)
+        case kVK_Delete:
+            if event.flags.contains(.maskCommand) {
+                enqueue(.deleteLine)
+            } else if event.flags.contains(.maskAlternate) {
+                enqueue(.deleteWord)
+            } else {
+                enqueue(.backspace)
+            }
             return Unmanaged.passUnretained(event)
-        case kVK_Return, kVK_Tab, kVK_Escape:
+        case kVK_ForwardDelete, kVK_Return, kVK_ANSI_KeypadEnter, kVK_Tab, kVK_Escape,
+             kVK_LeftArrow, kVK_RightArrow, kVK_UpArrow, kVK_DownArrow,
+             kVK_Home, kVK_End, kVK_PageUp, kVK_PageDown:
             enqueue(.delimiter(.now))
             return Unmanaged.passUnretained(event)
         default:
@@ -142,7 +167,7 @@ public final class InputObservationEngine: ObservableObject {
         }
 
         let text = keyboardText(from: event)
-        guard !text.isEmpty else {
+        guard !text.isEmpty, !Self.isFunctionKeyText(text) else {
             enqueue(.delimiter(.now))
             return Unmanaged.passUnretained(event)
         }
@@ -152,7 +177,7 @@ public final class InputObservationEngine: ObservableObject {
             .text(
                 text,
                 keyCode: keyCode,
-                eventTimestamp: event.timestamp,
+                eventUptimeNanoseconds: EventClock.uptimeNanoseconds(forEventTimestamp: event.timestamp),
                 capturedAt: now
             )
         )
@@ -174,20 +199,33 @@ public final class InputObservationEngine: ObservableObject {
         drainWorkItem = nil
         guard !pendingRecorderEvents.isEmpty else { return }
 
+        var m4gKeys = 0
+        var otherKeys = 0
         let resolved = pendingRecorderEvents.map { event -> ResolvedRecorderEvent in
             switch event {
-            case .text(let text, let keyCode, let eventTimestamp, let capturedAt):
+            case .text(let text, let keyCode, let eventUptimeNanoseconds, let capturedAt):
                 let source = inputSourceMonitor.source(
-                    forEventTimestamp: eventTimestamp,
+                    forEventTimestamp: eventUptimeNanoseconds,
                     virtualKeyCode: keyCode
                 )
+                switch source {
+                case .m4g: m4gKeys += 1
+                case .keyboard: otherKeys += 1
+                case .unknown: break
+                }
                 return .text(text, source: source, capturedAt: capturedAt)
             case .backspace:
                 return .backspace
+            case .deleteWord:
+                return .deleteWord
+            case .deleteLine:
+                return .deleteLine
             case .delimiter(let timestamp):
                 return .delimiter(timestamp)
             }
         }
+        if m4gKeys > 0 { m4gAttributedKeyCount += m4gKeys }
+        if otherKeys > 0 { otherKeyboardKeyCount += otherKeys }
         pendingRecorderEvents.removeAll(keepingCapacity: true)
         appendRecorderWork(resolved)
     }
@@ -209,6 +247,10 @@ public final class InputObservationEngine: ObservableObject {
                     )
                 case .backspace:
                     await recorder.observeBackspace()
+                case .deleteWord:
+                    await recorder.observeDeleteWord()
+                case .deleteLine:
+                    await recorder.observeDeleteLine()
                 case .delimiter(let timestamp):
                     await recorder.observeDelimiter(at: timestamp)
                 case .flush:
@@ -228,6 +270,11 @@ public final class InputObservationEngine: ObservableObject {
         )
         guard actualLength > 0 else { return "" }
         return String(utf16CodeUnits: buffer, count: actualLength)
+    }
+
+    /// Arrow, function and navigation keys produce private-use characters.
+    private static func isFunctionKeyText(_ text: String) -> Bool {
+        text.unicodeScalars.allSatisfy { (0xF700...0xF8FF).contains($0.value) }
     }
 
     private func isHostAppFrontmost() -> Bool {

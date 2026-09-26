@@ -1358,3 +1358,264 @@ public actor LibraryService {
         return nil
     }
 }
+
+// MARK: - Growth planning and practice
+
+extension LibraryService {
+    private static let growthSkipBanKind = "grow_skip"
+    private static let learnedChordsSettingKey = "practice.learned_chord_ids.v1"
+    /// Chord sources that mean "added from Chordsmith", as opposed to the
+    /// library imported from the device.
+    private static let addedChordSources = ["grow", "advisor", "quick_add", "suggestion", "user"]
+
+    /// Recorded words in the window, split into letter-by-letter and chorded
+    /// uses. Nexus imports carry no timing split and are left out.
+    public func wordSourceUsage(days: Int?, now: Date = .now) throws -> [WordSourceUsage] {
+        var predicates = ["source != ?"]
+        var bindings: [SQLiteValue] = [.text(UsageSource.nexusImport.rawValue)]
+        if let days {
+            let start = Calendar.current.date(byAdding: .day, value: -(max(days, 1) - 1), to: now) ?? now
+            predicates.append("day >= ?")
+            bindings.append(.text(usageDay(for: start)))
+        }
+        let rows = try database.query(
+            """
+            SELECT word, language, source,
+                   SUM(frequency) AS frequency,
+                   SUM(avg_ms * frequency) / SUM(frequency) AS avg_ms,
+                   MAX(last_used_at) AS last_used_at
+            FROM daily_word_stats
+            WHERE \(predicates.joined(separator: " AND "))
+            GROUP BY word, language, source
+            """,
+            bindings: bindings
+        )
+
+        struct Accumulator {
+            var language: WordLanguage
+            var typed = 0
+            var keyboard = 0
+            var chorded = 0
+            var typedTime = 0.0
+            var allTime = 0.0
+            var lastUsed = 0.0
+        }
+        let typedSources = Set(UsageSource.typedSources.map(\.rawValue))
+        let chordedSources = Set(UsageSource.chordedSources.map(\.rawValue))
+        var byWord: [String: Accumulator] = [:]
+        for row in rows {
+            guard let word = row.string("word"),
+                  let source = row.string("source"),
+                  let frequency = row.integer("frequency").map(Int.init),
+                  let avgMs = row.double("avg_ms") else { continue }
+            let language = WordLanguage(rawValue: row.string("language") ?? "") ?? .other
+            var entry = byWord[word] ?? Accumulator(language: language)
+            if typedSources.contains(source) {
+                entry.typed += frequency
+                entry.typedTime += avgMs * Double(frequency)
+                if source == UsageSource.keyboard.rawValue {
+                    entry.keyboard += frequency
+                }
+            } else if chordedSources.contains(source) {
+                entry.chorded += frequency
+            }
+            entry.allTime += avgMs * Double(frequency)
+            entry.lastUsed = max(entry.lastUsed, row.double("last_used_at") ?? 0)
+            byWord[word] = entry
+        }
+
+        return byWord.map { word, entry in
+            let total = entry.typed + entry.chorded
+            let typedAvg = entry.typed > 0
+                ? entry.typedTime / Double(entry.typed)
+                : entry.allTime / Double(max(total, 1))
+            return WordSourceUsage(
+                word: word,
+                language: entry.language,
+                typedFrequency: entry.typed,
+                keyboardFrequency: entry.keyboard,
+                chordedFrequency: entry.chorded,
+                typedAvgMs: typedAvg,
+                lastUsedAt: Date(timeIntervalSince1970: entry.lastUsed)
+            )
+        }
+        .sorted { $0.frequency == $1.frequency ? $0.word < $1.word : $0.frequency > $1.frequency }
+    }
+
+    /// Ranks the words that cost you the most time without a chord and gives
+    /// each a conflict-free chord, ready to stage as one batch.
+    public func growthPlan(
+        profile: ErgonomicProfile = .cc2A1,
+        days: Int = 30,
+        limit: Int = 100,
+        now: Date = .now
+    ) throws -> GrowthPlan {
+        let existingChords: [ChordEntry]
+        switch profile {
+        case .cc2A1:
+            existingChords = try deviceChords()
+        default:
+            existingChords = try activeChords(for: profile)
+        }
+        return GrowthPlanner(engine: suggestionEngine).plan(
+            usage: try wordSourceUsage(days: days, now: now),
+            profile: profile,
+            existingChords: existingChords,
+            bannedInputs: try bannedInputs(),
+            skippedWords: try skippedGrowthWords(),
+            dictionary: GrowthPlanner.loadSystemDictionary(),
+            windowDays: days,
+            limit: limit
+        )
+    }
+
+    public func skippedGrowthWords() throws -> Set<String> {
+        let rows = try database.query(
+            "SELECT value FROM bans WHERE kind = ?",
+            bindings: [.text(Self.growthSkipBanKind)]
+        )
+        return Set(rows.compactMap { $0.string("value") })
+    }
+
+    public func setGrowthWordSkipped(_ word: String, skipped: Bool) throws {
+        let normalized = word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return }
+        if skipped {
+            try database.execute(
+                "INSERT OR REPLACE INTO bans (kind, value, created_at) VALUES (?, ?, ?)",
+                bindings: [.text(Self.growthSkipBanKind), .text(normalized), .double(Date().timeIntervalSince1970)]
+            )
+        } else {
+            try database.execute(
+                "DELETE FROM bans WHERE kind = ? AND value = ?",
+                bindings: [.text(Self.growthSkipBanKind), .text(normalized)]
+            )
+        }
+    }
+
+    public func learnedChordIDs() throws -> Set<UUID> {
+        guard let value = try stringSetting(forKey: Self.learnedChordsSettingKey),
+              let ids = try? decoder.decode([String].self, from: Data(value.utf8)) else {
+            return []
+        }
+        return Set(ids.compactMap(UUID.init(uuidString:)))
+    }
+
+    public func setChordLearned(id: UUID, learned: Bool) throws {
+        var ids = try learnedChordIDs()
+        if learned {
+            ids.insert(id)
+        } else {
+            ids.remove(id)
+        }
+        let json = try String(decoding: encoder.encode(ids.map(\.uuidString).sorted()), as: UTF8.self)
+        try setSetting(Self.learnedChordsSettingKey, value: json)
+    }
+
+    /// What to practice: chords you have but did not use, typos of chorded
+    /// words, and recently added chords you have not adopted yet.
+    public func practiceReport(
+        days: Int = 7,
+        learningDays: Int = 30,
+        now: Date = .now
+    ) throws -> PracticeReport {
+        let usage = try wordSourceUsage(days: days, now: now)
+        let chords = try deviceChords()
+        let chordsByWord = GrowthPlanner.chordsByOutputWord(chords)
+        let knownFrequency = Dictionary(usage.map { ($0.word, $0.frequency) }, uniquingKeysWith: +)
+        let dictionary = GrowthPlanner.loadSystemDictionary()
+
+        var forgotten: [ForgottenChord] = []
+        var typos: [TypoFinding] = []
+        // Single letters are one keypress; there is nothing to gain by chording them.
+        for entry in usage where entry.language == .english && entry.typedFrequency > 0 && entry.word.count >= 2 {
+            if let wordChords = chordsByWord[entry.word] {
+                forgotten.append(
+                    ForgottenChord(
+                        word: entry.word,
+                        chordInputs: wordChords.map(GrowthPlanner.displayInput),
+                        typedFrequency: entry.typedFrequency,
+                        keyboardFrequency: entry.keyboardFrequency,
+                        chordedFrequency: entry.chordedFrequency,
+                        typedAvgMs: entry.typedAvgMs
+                    )
+                )
+            } else if entry.word.count >= 3,
+                      entry.typedFrequency >= 2,
+                      let intended = GrowthPlanner.intendedWord(
+                          forTypo: entry.word,
+                          frequency: entry.typedFrequency,
+                          chordedWords: chordsByWord,
+                          knownFrequency: knownFrequency,
+                          dictionary: dictionary
+                      ),
+                      let intendedChord = chordsByWord[intended]?.first {
+                typos.append(
+                    TypoFinding(
+                        typo: entry.word,
+                        intended: intended,
+                        frequency: entry.typedFrequency,
+                        intendedChordInput: GrowthPlanner.displayInput(intendedChord)
+                    )
+                )
+            }
+        }
+        forgotten.sort { lhs, rhs in
+            let lhsCost = Double(lhs.typedFrequency) * min(lhs.typedAvgMs, GrowthPlanner.avgMsCap)
+            let rhsCost = Double(rhs.typedFrequency) * min(rhs.typedAvgMs, GrowthPlanner.avgMsCap)
+            return lhsCost == rhsCost ? lhs.word < rhs.word : lhsCost > rhsCost
+        }
+        typos.sort { $0.frequency == $1.frequency ? $0.typo < $1.typo : $0.frequency > $1.frequency }
+
+        let learned = try learnedChordIDs()
+        let learningStart = Calendar.current.date(byAdding: .day, value: -max(learningDays, 1), to: now) ?? now
+        let recent = chords
+            .filter { Self.addedChordSources.contains($0.source) && $0.createdAt >= learningStart }
+            .sorted { $0.createdAt > $1.createdAt }
+        var learning: [LearningChord] = []
+        var learnedCount = 0
+        for chord in recent {
+            if learned.contains(chord.id) {
+                learnedCount += 1
+                continue
+            }
+            let word = (chord.plainOutput ?? chord.output).lowercased()
+            let addedDay = usageDay(for: chord.createdAt)
+            let chorded = try database.query(
+                """
+                SELECT COALESCE(SUM(frequency), 0) AS frequency
+                FROM daily_chord_stats
+                WHERE day >= ? AND (matched_chord_id = ? OR lower(output) = ?)
+                """,
+                bindings: [.text(addedDay), .text(chord.id.uuidString), .text(word)]
+            ).first?.integer("frequency") ?? 0
+            let typed = try database.query(
+                """
+                SELECT COALESCE(SUM(frequency), 0) AS frequency
+                FROM daily_word_stats
+                WHERE day >= ? AND word = ? AND source IN (?, ?)
+                """,
+                bindings: [
+                    .text(addedDay),
+                    .text(word),
+                    .text(UsageSource.keyboard.rawValue),
+                    .text(UsageSource.m4gTyping.rawValue)
+                ]
+            ).first?.integer("frequency") ?? 0
+            learning.append(LearningChord(chord: chord, chordedSinceAdded: Int(chorded), typedSinceAdded: Int(typed)))
+        }
+
+        let keyboardWords = usage.reduce(0) { $0 + $1.keyboardFrequency }
+        let typedWords = usage.reduce(0) { $0 + $1.typedFrequency }
+        return PracticeReport(
+            windowDays: days,
+            forgotten: Array(forgotten.prefix(80)),
+            typos: Array(typos.prefix(40)),
+            learning: learning,
+            learnedCount: learnedCount,
+            keyboardWords: keyboardWords,
+            m4gTypedWords: typedWords - keyboardWords,
+            chordedWords: usage.reduce(0) { $0 + $1.chordedFrequency }
+        )
+    }
+}

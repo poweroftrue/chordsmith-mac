@@ -224,6 +224,11 @@ public enum UsageSource: String, Codable, CaseIterable, Sendable, Identifiable {
 
     public var id: String { rawValue }
 
+    /// Sources where the word was produced letter by letter.
+    public static let typedSources: [UsageSource] = [.keyboard, .m4gTyping]
+    /// Sources where the word came out of a chord.
+    public static let chordedSources: [UsageSource] = [.m4gHIDConfirmed, .softwareChord]
+
     public var displayName: String {
         switch self {
         case .keyboard:
@@ -244,6 +249,9 @@ public enum ChordUsageConfidence: String, Codable, CaseIterable, Sendable, Ident
     case exactSoftware = "exact_software"
     case confirmedHardware = "confirmed_hardware"
     case ambiguousOutput = "ambiguous_output"
+    /// A chord-speed M4G burst with no exact library output, such as a chord
+    /// finished with a CCOS suffix modifier ("go" + -ing -> "going").
+    case chordBurst = "chord_burst"
     case nexusImport = "nexus_import"
 
     public var id: String { rawValue }
@@ -256,6 +264,8 @@ public enum ChordUsageConfidence: String, Codable, CaseIterable, Sendable, Ident
             return "Confirmed hardware"
         case .ambiguousOutput:
             return "Ambiguous output"
+        case .chordBurst:
+            return "Chord burst"
         case .nexusImport:
             return "Nexus import"
         }

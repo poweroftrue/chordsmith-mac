@@ -38,7 +38,9 @@ public enum ChordInputValidator {
             || trimmed.contains("\n")
 
         if hasSeparator {
-            let separators = CharacterSet(charactersIn: "+, \t\n")
+            // With `+` separators, a bare `,` is the comma key (`,+g+o`), not a
+            // separator. Without `+`, commas separate tokens (`t,h,e`).
+            let separators = CharacterSet(charactersIn: trimmed.contains("+") ? "+ \t\n" : "+, \t\n")
             return trimmed
                 .components(separatedBy: separators)
                 .map(normalizedToken)

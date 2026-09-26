@@ -234,11 +234,14 @@ struct RootView: View {
                     .tabItem { Label("Add", systemImage: "plus.circle") }
                     .tag(PanelTab.add)
                 stagedTab
-                    .tabItem { Label("Staged", systemImage: "tray.full") }
+                    .tabItem { Label(model.stagedChanges.isEmpty ? "Staged" : "Staged (\(model.stagedChanges.count))", systemImage: "tray.full") }
                     .tag(PanelTab.staged)
-                suggestionsTab
-                    .tabItem { Label("Suggestions", systemImage: "sparkles") }
-                    .tag(PanelTab.suggestions)
+                GrowTabView(model: model)
+                    .tabItem { Label("Grow", systemImage: "sparkles") }
+                    .tag(PanelTab.grow)
+                PracticeTabView(model: model)
+                    .tabItem { Label("Practice", systemImage: "target") }
+                    .tag(PanelTab.practice)
                 usageTab
                     .tabItem { Label("Usage", systemImage: "chart.bar.xaxis") }
                     .tag(PanelTab.usage)
@@ -282,18 +285,34 @@ struct RootView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Refresh") {
+                Button {
                     Task { await model.refresh() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
                 }
-                Button("Import JSON") {
-                    Task { await model.importChordJSON() }
+                .buttonStyle(.borderless)
+                .help("Reload the library and usage")
+                Menu {
+                    Button("Import Chord JSON…") {
+                        Task { await model.importChordJSON() }
+                    }
+                    Button("Export Chord JSON…") {
+                        Task { await model.exportChordJSON() }
+                    }
+                    Divider()
+                    Button("Settings…") {
+                        model.openSettings()
+                    }
+                    Button("Quit Chordsmith") {
+                        NSApp.terminate(nil)
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
-                Button("Export JSON") {
-                    Task { await model.exportChordJSON() }
-                }
-                Button("Exit") {
-                    NSApp.terminate(nil)
-                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("More")
             }
 
             if let device = model.deviceSource {
@@ -315,8 +334,11 @@ struct RootView: View {
 
             if !model.stagedChanges.isEmpty {
                 HStack {
-                    Label("\(model.stagedChanges.count) staged", systemImage: "tray.full")
+                    Label("\(model.stagedChanges.count) staged, not yet on the M4G", systemImage: "tray.full")
                     Spacer()
+                    Button("Review") {
+                        model.selectedTab = .staged
+                    }
                     Button("Undo") {
                         model.undoLastStagedChange()
                     }
@@ -520,11 +542,16 @@ struct RootView: View {
     private var stagedTab: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("\(model.stagedChanges.count) pending changes")
-                    .font(.headline)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(model.stagedChanges.count) pending change\(model.stagedChanges.count == 1 ? "" : "s")")
+                        .font(.headline)
+                    Text("Commit writes them to the library and the M4G in one batch.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
-                Button("Undo Last") {
-                    model.undoLastStagedChange()
+                Button("Clear") {
+                    model.clearStagedChanges()
                 }
                 .disabled(model.stagedChanges.isEmpty)
                 Button("Commit") {
@@ -534,90 +561,42 @@ struct RootView: View {
                 .buttonStyle(.borderedProminent)
             }
 
-            List {
-                ForEach(model.stagedChanges) { change in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(change.kind.rawValue)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(change.kind == .delete ? .red : .blue)
-                        Text(change.chord.output)
-                            .font(.headline)
-                        ActionTokenRow(tokens: change.chord.displayInput.isEmpty ? change.chord.inputKeys : change.chord.displayInput)
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-            .listStyle(.plain)
-        }
-    }
-
-    private var suggestionsTab: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Picker("Suggestion Profile", selection: $model.suggestionProfile) {
-                    ForEach([ErgonomicProfile.ansiQwerty, .cc2A1, .ansiColemak, .ansiColemakDH], id: \.self) { profile in
-                        Text(profile.displayName).tag(profile)
-                    }
-                }
-                .pickerStyle(.menu)
-
-                Spacer()
-
-                Button("Rebuild") {
-                    Task { await model.regenerateSuggestions() }
-                }
-            }
-
-            List {
-                ForEach(model.suggestions, id: \.id) { suggestion in
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text(suggestion.word)
-                                .font(.headline)
-                            Spacer()
-                            Text("Priority \(Int(suggestion.priorityScore))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        ForEach(suggestion.candidates) { candidate in
+            if model.stagedChanges.isEmpty {
+                PanelEmptyState(
+                    icon: "tray",
+                    title: "Nothing staged",
+                    detail: "Stage chords from Grow, Advisor or Add, check them here, then commit them together."
+                )
+            } else {
+                List {
+                    ForEach(model.stagedChanges) { change in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: change.kind == .delete ? "minus.circle.fill" : "plus.circle.fill")
+                                .foregroundStyle(change.kind == .delete ? .red : .green)
+                                .padding(.top, 2)
                             VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(candidate.inputKeys.joined(separator: "+"))
-                                        .font(.system(.subheadline, design: .monospaced))
-                                    Spacer()
-                                    if suggestion.acceptedChordId != nil {
-                                        Label("Use this chord", systemImage: "checkmark.circle.fill")
-                                            .font(.caption)
-                                            .foregroundStyle(.green)
-                                    } else {
-                                        Text(String(format: "%.1f", candidate.score))
-                                            .font(.caption)
-                                        Button("Software") {
-                                            Task { await model.acceptSuggestion(suggestion, candidate: candidate, target: .software) }
-                                        }
-                                        Button("Both") {
-                                            Task { await model.acceptSuggestion(suggestion, candidate: candidate, target: .both) }
-                                        }
-                                    }
-                                }
-                                if !candidate.softReasons.isEmpty {
-                                    Text(candidate.softReasons.joined(separator: " "))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
+                                Text(change.chord.output)
+                                    .font(.headline)
+                                    .strikethrough(change.kind == .delete)
+                                ActionTokenRow(tokens: change.chord.displayInput.isEmpty ? change.chord.inputKeys : change.chord.displayInput)
+                                Text("\(change.kind == .delete ? "Delete" : "Add") · \(change.chord.deploymentTarget.displayName) · \(change.chord.source)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
                             }
-                            .padding(.vertical, 2)
+                            Spacer()
+                            Button {
+                                model.removeStagedChange(change)
+                            } label: {
+                                Image(systemName: "xmark.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
+                            .help("Unstage")
                         }
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 4)
                 }
-            }
-            .listStyle(.plain)
-        }
-        .onChange(of: model.suggestionProfile) { _ in
-            Task {
-                await model.refresh()
+                .listStyle(.plain)
             }
         }
     }
@@ -633,6 +612,10 @@ struct RootView: View {
                     .foregroundStyle(model.inputObserver.isRunning ? .green : .secondary)
                     Text(model.inputObserver.attributionStatusText)
                         .foregroundStyle(.secondary)
+                    if model.inputObserver.isRunning {
+                        Text("This session: \(model.inputObserver.m4gAttributedKeyCount) keys from the M4G · \(model.inputObserver.otherKeyboardKeyCount) from other keyboards")
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 if model.inputObserver.needsInputMonitoringPermission {
@@ -712,7 +695,7 @@ struct RootView: View {
             }
 
             List {
-                Section("Most used without an M4G chord") {
+                Section {
                     if model.wordCoverageReport.uncoveredWords.isEmpty {
                         Text("No uncovered words in this filter.")
                             .foregroundStyle(.secondary)
@@ -720,6 +703,16 @@ struct RootView: View {
                         ForEach(model.wordCoverageReport.uncoveredWords.prefix(15)) { usage in
                             coverageWordRow(usage)
                         }
+                    }
+                } header: {
+                    HStack {
+                        Text("Most used without an M4G chord")
+                        Spacer()
+                        Button("Plan chords in Grow") {
+                            model.selectedTab = .grow
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
                     }
                 }
 
@@ -937,9 +930,12 @@ struct RootView: View {
                 model.selectedTab = .staged
                 return true
             case "5":
-                model.selectedTab = .suggestions
+                model.selectedTab = .grow
                 return true
             case "6":
+                model.selectedTab = .practice
+                return true
+            case "7":
                 model.selectedTab = .usage
                 return true
             case "f", "k":
@@ -984,7 +980,7 @@ struct RootView: View {
             case .add:
                 focusedField = nil
                 addFocusToken += 1
-            case .staged, .suggestions, .usage:
+            case .staged, .grow, .practice, .usage:
                 focusedField = nil
             }
         }
@@ -1006,8 +1002,14 @@ struct RootView: View {
             saveMenuQuickChord()
         case .staged:
             Task { await model.commitStagedChanges() }
-        case .suggestions:
-            Task { await model.regenerateSuggestions() }
+        case .grow:
+            if model.growthSelection.isEmpty {
+                Task { await model.loadGrowthPlan() }
+            } else {
+                model.stageSelectedGrowthItems()
+            }
+        case .practice:
+            Task { await model.loadPracticeReport() }
         case .usage:
             Task { await model.loadUsageReport() }
         }

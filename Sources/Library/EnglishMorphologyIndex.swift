@@ -181,7 +181,7 @@ public struct EnglishMorphologyIndex: Sendable {
         if word.hasSuffix("ied"), word.count > 4 {
             add(String(word.dropLast(3)) + "y", .past, "d", 0.78)
         }
-        if word.hasSuffix("ed"), word.count > 4 {
+        if word.hasSuffix("ed"), word.count > 3 {
             let base = String(word.dropLast(2))
             add(base, .past, "d", 0.72)
             add(base + "e", .past, "d", 0.76)
@@ -193,7 +193,7 @@ public struct EnglishMorphologyIndex: Sendable {
         if word.hasSuffix("ying"), word.count > 5 {
             add(String(word.dropLast(4)) + "y", .gerund, "g", 0.78)
         }
-        if word.hasSuffix("ing"), word.count > 5 {
+        if word.hasSuffix("ing"), word.count > 4 {
             let base = String(word.dropLast(3))
             add(base, .gerund, "g", 0.72)
             add(base + "e", .gerund, "g", 0.76)
