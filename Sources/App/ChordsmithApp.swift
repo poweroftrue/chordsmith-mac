@@ -54,9 +54,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { nudge in nudgeController.show(nudge) }
             .store(in: &observers)
         model.$todayUsage
-            .combineLatest(model.$showChordRateInMenuBar)
+            .combineLatest(model.$showChordRateInMenuBar, model.inputObserver.$isM4GConnected)
             .receive(on: RunLoop.main)
-            .sink { [weak self] usage, visible in self?.updateStatusItem(usage: usage, visible: visible) }
+            .sink { [weak self] usage, visible, connected in
+                self?.updateStatusItem(usage: usage, visible: visible, m4gConnected: connected)
+            }
             .store(in: &observers)
         setupStatusItem()
         setupPopover()
@@ -100,12 +102,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Today's chord rate beside the menu bar icon, with the details and the
     /// goal in the tooltip.
-    private func updateStatusItem(usage: TodayUsage, visible: Bool) {
+    private func updateStatusItem(usage: TodayUsage, visible: Bool, m4gConnected: Bool) {
         guard let button = statusItem?.button else { return }
+        let pausedNote = "Master Forge not connected: chord hints are paused and typing doesn't count against your chord rate."
         guard visible, let rate = usage.chordRate, usage.words >= 20 else {
             button.title = ""
             button.imagePosition = .imageOnly
-            button.toolTip = "Chordsmith"
+            button.toolTip = m4gConnected ? "Chordsmith" : "Chordsmith\n\(pausedNote)"
             return
         }
         button.imagePosition = .imageLeading
@@ -124,6 +127,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lines.append("M4G speed today: \(Int(blended.rounded())) WPM" + (detail.isEmpty ? "" : " (\(detail))"))
         } else if let m4g = usage.m4gWPM {
             lines.append("M4G letter speed today: \(Int(m4g.rounded())) WPM")
+        }
+        if !m4gConnected {
+            lines.append(pausedNote)
         }
         button.toolTip = lines.joined(separator: "\n")
         button.setAccessibilityLabel("Chordsmith, \(Int((rate * 100).rounded())) percent chorded today")
@@ -1281,7 +1287,7 @@ struct SettingsView: View {
                 }
                 .disabled(!model.coachSettings.enabled)
                 Toggle("Show today's chord rate in the menu bar", isOn: $model.showChordRateInMenuBar)
-                Text("Hints appear under the menu bar without taking focus, and fade on their own.")
+                Text("Hints appear under the menu bar without taking focus, and fade on their own. They pause automatically while no Master Forge is connected.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -646,6 +646,30 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(report.totals.misfires, 0)
     }
 
+    func testUsageRecorderMarksTypingWithoutAMasterForgeAsAway() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let recorder = TypingRecorder(libraryService: library)
+        let exit = ChordEntry(inputKeys: ["i", "x"], output: "exit", profile: .cc2A1, deploymentTarget: .device, source: "test")
+        try await library.upsertChord(exit)
+        await recorder.setM4GConnected(false)
+        let start = Date()
+
+        await recorder.observeKeyboardText("exit ", startedAt: start, endedAt: start.addingTimeInterval(0.5))
+        await recorder.flush()
+
+        let words = try await library.dailyWordUsage(days: 1, limit: 10)
+        XCTAssertEqual(words.first?.source, .keyboardAway)
+        let report = try await library.practiceReport(days: 1)
+        XCTAssertTrue(report.forgotten.isEmpty, "typing with no M4G is not a forgotten chord")
+        let stats = try await library.statsReport(period: .week)
+        XCTAssertEqual(stats.totals.awayWords, 1)
+        XCTAssertEqual(stats.totals.words, 1)
+        XCTAssertNil(stats.totals.chordRate)
+    }
+
     func testSoftwareChordPhraseRecordsIndividualMultilingualWords() async throws {
         let temp = try TemporaryDirectory()
         defer { temp.remove() }

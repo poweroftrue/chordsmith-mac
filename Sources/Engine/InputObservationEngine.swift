@@ -12,6 +12,9 @@ public final class InputObservationEngine: ObservableObject {
     /// Keys matched to the Master Forge's own HID reports since the recorder
     /// started, versus keys from any other keyboard. A running Forge with zero
     /// matched keys means attribution is broken, not that you never chord.
+    /// Whether a Master Forge is plugged in right now. Without one, chords
+    /// are impossible, so typing is recorded as "away" and never coached.
+    @Published public private(set) var isM4GConnected = false
     @Published public private(set) var m4gAttributedKeyCount = 0
     @Published public private(set) var otherKeyboardKeyCount = 0
 
@@ -58,9 +61,13 @@ public final class InputObservationEngine: ObservableObject {
             return
         }
 
+        inputSourceMonitor.onConnectionChange = { [weak self] halves in
+            Task { @MainActor in self?.m4gConnectionChanged(halves: halves) }
+        }
         let inputSourceStatus = inputSourceMonitor.start()
         needsInputMonitoringPermission = false
         attributionStatusText = inputSourceStatus.displayText
+        m4gConnectionChanged(halves: inputSourceStatus.isMonitoring ? inputSourceStatus.m4gHalfCount : 0)
 
         // Clicks move the cursor, so they end the word being tracked.
         let mask = (1 << CGEventType.keyDown.rawValue)
@@ -187,6 +194,17 @@ public final class InputObservationEngine: ObservableObject {
             )
         )
         return Unmanaged.passUnretained(event)
+    }
+
+    private func m4gConnectionChanged(halves: Int) {
+        let connected = halves > 0
+        if isRunning || eventTap != nil {
+            attributionStatusText = HIDInputMonitorStatus(isMonitoring: true, m4gHalfCount: halves, errorCode: nil).displayText
+        }
+        guard connected != isM4GConnected else { return }
+        isM4GConnected = connected
+        let recorder = recorder
+        Task { await recorder.setM4GConnected(connected) }
     }
 
     private func enqueue(_ event: PendingRecorderEvent) {

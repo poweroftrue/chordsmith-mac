@@ -40,6 +40,18 @@ final class CoachingTests: XCTestCase {
         XCTAssertEqual(today.m4gWPM ?? 0, 60, accuracy: 0.1)
     }
 
+    func testTodayUsageLeavesAwayTypingOutOfTheChordRate() {
+        var today = TodayUsage()
+        today.record(word: "the", source: .m4gHIDConfirmed, avgMs: 5, isGoalWord: true)
+        today.record(word: "the", source: .keyboardAway, avgMs: 200, isGoalWord: true)
+        today.record(word: "and", source: .keyboardAway, avgMs: 200, isGoalWord: false)
+
+        XCTAssertEqual(today.chordRate, 1)
+        XCTAssertEqual(today.goalRate, 1)
+        XCTAssertEqual(today.awayWords, 2)
+        XCTAssertNil(today.handCounts["the"])
+    }
+
     func testSpeedDrillTimesLetterPairsAndIgnoresPauses() {
         let start = Date()
         let typed: [(character: Character, time: Date)] = [

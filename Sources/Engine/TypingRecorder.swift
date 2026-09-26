@@ -61,6 +61,9 @@ public actor UsageRecorder {
     /// deleted outright.
     private var deletionStart: [BufferedCharacter]?
     private var pendingMisfires: [(word: String, at: Date)] = []
+    /// Assumed connected until the HID monitor says otherwise, so words are
+    /// never marked "away" by mistake.
+    private var m4gConnected = true
 
     private let newWordThreshold: TimeInterval = 5.0
     /// Upper bound for the gap between characters of one chord output.
@@ -68,6 +71,10 @@ public actor UsageRecorder {
 
     public init(libraryService: LibraryService) {
         self.libraryService = libraryService
+    }
+
+    public func setM4GConnected(_ connected: Bool) {
+        m4gConnected = connected
     }
 
     public func setWordObserver(_ observer: (@Sendable (RecordedWord) -> Void)?) {
@@ -326,9 +333,12 @@ public actor UsageRecorder {
             lastWordEndedAt = nil
             return
         }
-        let source: UsageSource = characters.allSatisfy({ $0.source == .m4g })
-            ? .m4gTyping
-            : .keyboard
+        let source: UsageSource
+        if characters.allSatisfy({ $0.source == .m4g }) {
+            source = .m4gTyping
+        } else {
+            source = m4gConnected ? .keyboard : .keyboardAway
+        }
 
         let cycle: Double?
         if words.count == 1, let word = words.first?.text {

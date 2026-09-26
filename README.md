@@ -62,6 +62,12 @@ seconds apart, 10 minutes per word, a per-hour cap you choose) and can be
 limited to typing on the Master Forge. Configure them in Settings › Live
 coaching.
 
+When no Master Forge is connected (both halves unplugged), hints pause
+automatically. Words typed then are recorded as "keyboard, M4G not connected":
+they count toward word totals and typing speed, but not against your chord
+rate, the forgotten-chords list or Grow's ranking, because no chord was
+possible.
+
 The menu bar shows today's chord rate next to the icon; its tooltip adds the
 goal (90% of your 50 most-used chorded words) and today's M4G letter speed.
 

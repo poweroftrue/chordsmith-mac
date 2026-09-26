@@ -121,6 +121,9 @@ public final class HIDInputSourceMonitor: @unchecked Sendable {
     private var correlator = HIDInputCorrelator()
     private var monitoring = false
     private var connectedM4GHalfRegistryIDs: Set<UInt64> = []
+    /// Called on the main run loop with the number of connected halves
+    /// whenever a Master Forge half is plugged in or removed.
+    public var onConnectionChange: (@Sendable (Int) -> Void)?
 
     public init() {
         manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -226,14 +229,18 @@ public final class HIDInputSourceMonitor: @unchecked Sendable {
               let registryID = Self.registryID(for: device) else { return }
         lock.lock()
         connectedM4GHalfRegistryIDs.insert(registryID)
+        let count = connectedM4GHalfRegistryIDs.count
         lock.unlock()
+        onConnectionChange?(count)
     }
 
     private func deviceRemoved(_ device: IOHIDDevice) {
         guard let registryID = Self.registryID(for: device) else { return }
         lock.lock()
         connectedM4GHalfRegistryIDs.remove(registryID)
+        let count = connectedM4GHalfRegistryIDs.count
         lock.unlock()
+        onConnectionChange?(count)
     }
 
     private func discoveredM4GHalves() -> [IOHIDDevice] {

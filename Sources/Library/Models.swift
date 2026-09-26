@@ -217,6 +217,9 @@ public struct ChordStat: Codable, Hashable, Sendable {
 
 public enum UsageSource: String, Codable, CaseIterable, Sendable, Identifiable {
     case keyboard
+    /// Typed on another keyboard while no Master Forge was connected, so no
+    /// chord was possible. Counts as typing, never as a missed chord.
+    case keyboardAway = "keyboard_away"
     case m4gTyping = "m4g_typing"
     case m4gHIDConfirmed = "m4g_hid_confirmed"
     case softwareChord = "software_chord"
@@ -233,6 +236,8 @@ public enum UsageSource: String, Codable, CaseIterable, Sendable, Identifiable {
         switch self {
         case .keyboard:
             return "Keyboard"
+        case .keyboardAway:
+            return "Keyboard, M4G not connected"
         case .m4gTyping:
             return "M4G typing"
         case .m4gHIDConfirmed:

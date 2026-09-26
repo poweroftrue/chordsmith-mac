@@ -60,6 +60,12 @@ final class CoachEngineTests: XCTestCase {
         XCTAssertNil(engine.nudge(for: word("the", .m4gTyping), handCountToday: 1, snapshot: snapshot, suggestions: [:], settings: settings, now: Date().addingTimeInterval(120)))
     }
 
+    func testNeverNudgesWhenNoMasterForgeIsConnected() {
+        var engine = CoachEngine()
+        XCTAssertNil(engine.nudge(for: word("exit", .keyboardAway), handCountToday: 5, snapshot: snapshot, suggestions: [:], settings: CoachSettings()))
+        XCTAssertNil(engine.nudge(for: word("hte", .keyboardAway), handCountToday: 5, snapshot: snapshot, suggestions: [:], settings: CoachSettings()))
+    }
+
     func testHourlyLimit() {
         var engine = CoachEngine()
         var settings = CoachSettings()

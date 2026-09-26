@@ -163,6 +163,9 @@ struct StatsTabView<Details: View>: View {
         if let m4g = totals.m4gWPM, let keyboard = totals.keyboardWPM {
             parts.append("letter by letter you type \(Int(m4g.rounded())) WPM on the M4G and \(Int(keyboard.rounded())) WPM on other keyboards")
         }
+        if totals.awayWords > 0 {
+            parts.append("\(totals.awayWords.formatted()) words typed with no M4G connected don't count against your chord rate")
+        }
         let sentence = parts.joined(separator: "; ") + "."
         return sentence.prefix(1).uppercased() + sentence.dropFirst()
     }
@@ -627,7 +630,8 @@ private struct WordsChartCard: View {
             let parts: [(String, Color, Int)] = [
                 ("Chorded", StatsPalette.chorded, bucket.chordedWords),
                 ("Typed on M4G", StatsPalette.m4gTyped, bucket.m4gTypedWords),
-                ("Other keyboard", StatsPalette.keyboard, bucket.keyboardWords)
+                ("Other keyboard", StatsPalette.keyboard, bucket.keyboardWords),
+                ("M4G not connected", StatsPalette.context, bucket.awayWords)
             ]
             return parts.compactMap { name, color, count in
                 guard count > 0 else { return nil }
@@ -660,6 +664,10 @@ private struct WordsChartCard: View {
                     LegendItem(color: StatsPalette.chorded, label: "Chorded", value: report.totals.chordedWords.formatted())
                     LegendItem(color: StatsPalette.m4gTyped, label: "Typed on M4G", value: report.totals.m4gTypedWords.formatted())
                     LegendItem(color: StatsPalette.keyboard, label: "Other keyboard", value: report.totals.keyboardWords.formatted())
+                    if report.totals.awayWords > 0 {
+                        LegendItem(color: StatsPalette.context, label: "M4G not connected", value: report.totals.awayWords.formatted())
+                            .help("Typed while no Master Forge was plugged in. These count as typing but not against your chord rate.")
+                    }
                     Spacer()
                     Toggle("Table", isOn: $showsTable)
                         .toggleStyle(.button)
@@ -736,7 +744,8 @@ private struct WordsChartCard: View {
                 series: [
                     ("Chorded", report.buckets.map { ($0.start, Double($0.chordedWords)) }),
                     ("Typed on M4G", report.buckets.map { ($0.start, Double($0.m4gTypedWords)) }),
-                    ("Other keyboard", report.buckets.map { ($0.start, Double($0.keyboardWords)) })
+                    ("Other keyboard", report.buckets.map { ($0.start, Double($0.keyboardWords)) }),
+                    ("M4G not connected", report.buckets.map { ($0.start, Double($0.awayWords)) })
                 ],
                 period: report.period
             )
@@ -750,6 +759,7 @@ private struct WordsChartCard: View {
                 Text("Chorded")
                 Text("M4G")
                 Text("Other")
+                Text("No M4G")
                 Text("Total")
             }
             .font(.caption.weight(.semibold))
@@ -760,6 +770,7 @@ private struct WordsChartCard: View {
                     Text(bucket.chordedWords.formatted())
                     Text(bucket.m4gTypedWords.formatted())
                     Text(bucket.keyboardWords.formatted())
+                    Text(bucket.awayWords.formatted())
                     Text(bucket.words.formatted()).fontWeight(.semibold)
                 }
                 .font(.caption.monospacedDigit())

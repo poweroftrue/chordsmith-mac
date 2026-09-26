@@ -215,6 +215,8 @@ public struct TodayUsage: Sendable {
     public let day: Date
     public var chordedWords = 0
     public var handTypedWords = 0
+    /// Typed with no Master Forge connected; left out of the chord rate.
+    public var awayWords = 0
     public var goalChorded = 0
     public var goalTotal = 0
     public var m4gLetters = 0
@@ -248,7 +250,7 @@ public struct TodayUsage: Sendable {
             case .m4gTyping:
                 speed.m4gLetterSpeedChars += letters + 1
                 speed.m4gLetterSpeedMs += cycleMs
-            case .keyboard:
+            case .keyboard, .keyboardAway:
                 speed.keyboardSpeedChars += letters + 1
                 speed.keyboardSpeedMs += cycleMs
             case .softwareChord, .nexusImport:
@@ -269,6 +271,11 @@ public struct TodayUsage: Sendable {
             keyboardLetters += letters
             keyboardMs += ms
             handCounts[word, default: 0] += 1
+        case .keyboardAway:
+            awayWords += 1
+            keyboardLetters += letters
+            keyboardMs += ms
+            return
         case .nexusImport:
             return
         }

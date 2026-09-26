@@ -39,6 +39,8 @@ public struct StatsBucket: Codable, Hashable, Sendable, Identifiable {
     public var chordedWords = 0
     public var m4gTypedWords = 0
     public var keyboardWords = 0
+    /// Typed while no Master Forge was connected: no chord was possible.
+    public var awayWords = 0
     /// Chord outputs recorded, including multi-word phrases.
     public var chordsUsed = 0
     /// Uses of words that are almost certainly misspellings.
@@ -72,12 +74,14 @@ public struct StatsBucket: Codable, Hashable, Sendable, Identifiable {
         self.start = start
     }
 
-    public var words: Int { chordedWords + m4gTypedWords + keyboardWords }
-    public var handTypedWords: Int { m4gTypedWords + keyboardWords }
+    public var words: Int { chordedWords + m4gTypedWords + keyboardWords + awayWords }
+    public var handTypedWords: Int { m4gTypedWords + keyboardWords + awayWords }
+    /// Words written while a chord was possible.
+    public var chordableWords: Int { chordedWords + m4gTypedWords + keyboardWords }
     public var handTypingMs: Double { keyboardMs + m4gMs }
 
-    public var chordRate: Double? { words > 0 ? Double(chordedWords) / Double(words) : nil }
-    public var coverageRate: Double? { words > 0 ? Double(coveredWords) / Double(words) : nil }
+    public var chordRate: Double? { chordableWords > 0 ? Double(chordedWords) / Double(chordableWords) : nil }
+    public var coverageRate: Double? { chordableWords > 0 ? Double(coveredWords) / Double(chordableWords) : nil }
     /// Typos per word typed by hand: chords never produce letter slips.
     public var typoRate: Double? { handTypedWords > 0 ? Double(typoWords) / Double(handTypedWords) : nil }
     public var misfires: Int { deletedMisfires + garbledMisfires }
@@ -118,6 +122,7 @@ public struct StatsBucket: Codable, Hashable, Sendable, Identifiable {
         chordedWords += other.chordedWords
         m4gTypedWords += other.m4gTypedWords
         keyboardWords += other.keyboardWords
+        awayWords += other.awayWords
         chordsUsed += other.chordsUsed
         typoWords += other.typoWords
         coveredWords += other.coveredWords
@@ -362,10 +367,14 @@ public struct StatsBuilder: Sendable {
                     bucket.keyboardWords += row.frequency
                     bucket.keyboardLetters += letters
                     bucket.keyboardMs += time
+                case .keyboardAway:
+                    bucket.awayWords += row.frequency
+                    bucket.keyboardLetters += letters
+                    bucket.keyboardMs += time
                 case .nexusImport:
                     break
                 }
-                if hasChord { bucket.coveredWords += row.frequency }
+                if hasChord, row.source != .keyboardAway { bucket.coveredWords += row.frequency }
                 if isTypo { bucket.typoWords += row.frequency }
                 if !hasChord, row.source == .keyboard || row.source == .m4gTyping {
                     bucket.unchordedMs += time
