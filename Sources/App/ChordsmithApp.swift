@@ -1,4 +1,5 @@
 @preconcurrency import AppKit
+import Combine
 import Device
 import Engine
 import KeyboardShortcuts
@@ -12,7 +13,7 @@ struct ChordsmithApp: App {
     var body: some Scene {
         Settings {
             SettingsView(model: appDelegate.model)
-                .frame(width: 440, height: 460)
+                .frame(width: 480, height: 700)
         }
     }
 }
@@ -24,6 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover?
     private var quickChordPanel: NSPanel?
     private var mainWindow: NSWindow?
+    private var nudgeController: NudgePanelController?
+    private var observers: Set<AnyCancellable> = []
     private var lastControlPress: Date?
     private var globalControlMonitor: Any?
     private var localControlMonitor: Any?
@@ -43,6 +46,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.openWindowAction = { [weak self] in
             self?.showMainWindow()
         }
+        let nudgeController = NudgePanelController(model: model)
+        self.nudgeController = nudgeController
+        model.$currentNudge
+            .compactMap { $0 }
+            .receive(on: RunLoop.main)
+            .sink { nudge in nudgeController.show(nudge) }
+            .store(in: &observers)
+        model.$todayUsage
+            .combineLatest(model.$showChordRateInMenuBar)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] usage, visible in self?.updateStatusItem(usage: usage, visible: visible) }
+            .store(in: &observers)
         setupStatusItem()
         setupPopover()
         setupKeyboardShortcuts()
@@ -81,6 +96,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.action = #selector(togglePopover)
             button.target = self
         }
+    }
+
+    /// Today's chord rate beside the menu bar icon, with the details and the
+    /// goal in the tooltip.
+    private func updateStatusItem(usage: TodayUsage, visible: Bool) {
+        guard let button = statusItem?.button else { return }
+        guard visible, let rate = usage.chordRate, usage.words >= 20 else {
+            button.title = ""
+            button.imagePosition = .imageOnly
+            button.toolTip = "Chordsmith"
+            return
+        }
+        button.imagePosition = .imageLeading
+        button.attributedTitle = NSAttributedString(
+            string: " \(Int((rate * 100).rounded()))%",
+            attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize - 1, weight: .medium)]
+        )
+        var lines = ["Today: \(Int((rate * 100).rounded()))% chorded (\(usage.chordedWords.formatted()) of \(usage.words.formatted()) words)"]
+        if let goal = usage.goalRate {
+            lines.append("Goal: 90% of your 50 most-used chorded words. Today \(Int((goal * 100).rounded()))%.")
+        }
+        if let m4g = usage.m4gWPM {
+            lines.append("M4G letter speed today: \(Int(m4g.rounded())) WPM")
+        }
+        button.toolTip = lines.joined(separator: "\n")
+        button.setAccessibilityLabel("Chordsmith, \(Int((rate * 100).rounded())) percent chorded today")
     }
 
     private func setupPopover() {
@@ -1212,6 +1253,32 @@ struct SettingsView: View {
                 KeyboardShortcuts.Recorder(for: .quickAdvisor)
                 KeyboardShortcuts.Recorder(for: .quickAdd)
                 KeyboardShortcuts.Recorder("Open in window", name: .openWindow)
+            }
+
+            Section("Live coaching") {
+                Toggle("Show a hint when a chord would have been faster", isOn: $model.coachSettings.enabled)
+                Group {
+                    Toggle("Words you already have a chord for", isOn: $model.coachSettings.forgotten)
+                    Toggle("Typos of chorded words", isOn: $model.coachSettings.typos)
+                    Toggle("Offer a chord for words you keep typing", isOn: $model.coachSettings.suggestions)
+                    Toggle("Only while typing on the Master Forge", isOn: $model.coachSettings.m4gOnly)
+                    Stepper(
+                        "At most \(model.coachSettings.maxPerHour) hints an hour",
+                        value: $model.coachSettings.maxPerHour,
+                        in: 1...60
+                    )
+                }
+                .disabled(!model.coachSettings.enabled)
+                Toggle("Show today's chord rate in the menu bar", isOn: $model.showChordRateInMenuBar)
+                Text("Hints appear under the menu bar without taking focus, and fade on their own.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .onChange(of: model.coachSettings) { _ in
+                Task { await model.saveCoachSettings() }
+            }
+            .onChange(of: model.showChordRateInMenuBar) { _ in
+                Task { await model.saveCoachSettings() }
             }
 
             Section("Engine") {

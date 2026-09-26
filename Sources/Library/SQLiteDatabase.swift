@@ -342,6 +342,41 @@ final class SQLiteDatabase {
             )
             """
         )
+        // Two- and three-word phrases, as counts only, for phrase chords.
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_phrase_stats (
+                day TEXT NOT NULL,
+                phrase TEXT NOT NULL,
+                word_count INTEGER NOT NULL,
+                frequency INTEGER NOT NULL,
+                hand_frequency INTEGER NOT NULL,
+                PRIMARY KEY (day, phrase)
+            )
+            """
+        )
+        // Letter-by-letter speed drills and the letter pairs that slow you down.
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS speed_drills (
+                id TEXT PRIMARY KEY,
+                finished_at REAL NOT NULL,
+                wpm REAL NOT NULL,
+                accuracy REAL NOT NULL,
+                characters INTEGER NOT NULL,
+                slow_bigrams_json TEXT NOT NULL
+            )
+            """
+        )
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS drill_bigrams (
+                bigram TEXT PRIMARY KEY,
+                total_ms REAL NOT NULL,
+                count INTEGER NOT NULL
+            )
+            """
+        )
         // Keystroke and backspace counts per day, for the correction rate.
         try execute(
             """

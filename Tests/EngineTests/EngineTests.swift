@@ -536,6 +536,41 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(usage.first { $0.word == "fine" }?.completedFrequency, 0)
     }
 
+    func testUsageRecorderCountsPhrasesSeparatedBySingleSpaces() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let recorder = TypingRecorder(libraryService: library)
+        let start = Date()
+
+        await recorder.observeKeyboardText("can you help. then ", startedAt: start, endedAt: start.addingTimeInterval(2))
+        await recorder.flush()
+
+        let phrases = try await library.phraseUsage(days: 1)
+        XCTAssertEqual(Set(phrases.map(\.phrase)), ["can you", "you help", "can you help"])
+        XCTAssertTrue(phrases.allSatisfy { $0.handFrequency == 1 })
+    }
+
+    func testUsageRecorderReportsEveryRecordedWord() async throws {
+        let temp = try TemporaryDirectory()
+        defer { temp.remove() }
+
+        let library = try LibraryService(databaseURL: temp.url.appendingPathComponent("chordsmith.sqlite3"))
+        let recorder = TypingRecorder(libraryService: library)
+        let seen = WordCollector()
+        await recorder.setWordObserver { word in seen.append(word) }
+        let start = Date()
+
+        await recorder.observeKeyboardText("the", source: .m4g, startedAt: start, endedAt: start.addingTimeInterval(0.004))
+        await recorder.observeKeyboardText(" exit ", startedAt: start.addingTimeInterval(1), endedAt: start.addingTimeInterval(1.6))
+        await recorder.flush()
+
+        let words = seen.words
+        XCTAssertEqual(words.map(\.word), ["the", "exit"])
+        XCTAssertEqual(words.map(\.source), [.m4gHIDConfirmed, .keyboard])
+    }
+
     func testSoftwareChordPhraseRecordsIndividualMultilingualWords() async throws {
         let temp = try TemporaryDirectory()
         defer { temp.remove() }
@@ -571,3 +606,21 @@ private struct TemporaryDirectory {
         try? FileManager.default.removeItem(at: url)
     }
 }
+
+private final class WordCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [RecordedWord] = []
+
+    func append(_ word: RecordedWord) {
+        lock.lock()
+        stored.append(word)
+        lock.unlock()
+    }
+
+    var words: [RecordedWord] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+

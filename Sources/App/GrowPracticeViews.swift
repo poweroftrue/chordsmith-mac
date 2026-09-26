@@ -1,3 +1,4 @@
+import Charts
 import Library
 import SwiftUI
 
@@ -13,6 +14,25 @@ struct GrowTabView: View {
     private var stagedWords: Set<String> { model.stagedOutputs() }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Plan", selection: $model.growMode) {
+                ForEach(AppModel.GrowMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 220)
+
+            if model.growMode == .phrases {
+                PhraseGrowView(model: model)
+            } else {
+                wordsBody
+            }
+        }
+    }
+
+    private var wordsBody: some View {
         VStack(alignment: .leading, spacing: 10) {
             summary
             controls
@@ -301,15 +321,134 @@ private struct GrowRow: View {
     }
 }
 
+// MARK: - Phrases
+
+/// Phrase chords: one chord for two or three words you write together.
+private struct PhraseGrowView: View {
+    @ObservedObject var model: AppModel
+
+    private var stagedOutputs: Set<String> { model.stagedOutputs() }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                PanelMetric(
+                    title: "Phrases worth a chord",
+                    value: "\(model.phrasePlan.count)",
+                    detail: "seen \(4)+ times in \(model.growthWindowDays) days"
+                )
+                PanelMetric(
+                    title: "Selected",
+                    value: "\(model.phraseSelection.count)",
+                    detail: "stage, then Commit"
+                )
+            }
+            HStack(spacing: 8) {
+                Text("Phrase chords use the first letter of each word plus space.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if model.isPlanningPhrases {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer()
+                Button("Stage \(model.phraseSelection.count)") {
+                    model.stageSelectedPhrases()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.phraseSelection.isEmpty)
+            }
+            if model.phrasePlan.isEmpty {
+                PanelEmptyState(
+                    icon: "text.quote",
+                    title: model.isPlanningPhrases ? "Looking for phrases…" : "No phrases yet",
+                    detail: "Chordsmith counts two- and three-word phrases from now on, only as counts. Phrases you write at least 4 times show up here, usually within a day or two."
+                )
+            } else {
+                List {
+                    ForEach(model.phrasePlan) { item in
+                        row(item)
+                    }
+                }
+                .listStyle(.plain)
+            }
+        }
+        .task {
+            if !model.hasLoadedPhrasePlan {
+                await model.loadPhrasePlan()
+            }
+        }
+    }
+
+    private func row(_ item: PhraseItem) -> some View {
+        let isStaged = stagedOutputs.contains(item.phrase)
+        return HStack(alignment: .top, spacing: 10) {
+            Toggle("", isOn: Binding(
+                get: { model.phraseSelection.contains(item.phrase) },
+                set: { selected in
+                    if selected { model.phraseSelection.insert(item.phrase) } else { model.phraseSelection.remove(item.phrase) }
+                }
+            ))
+            .toggleStyle(.checkbox)
+            .labelsHidden()
+            .disabled(isStaged)
+            .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text(item.phrase)
+                        .font(.headline)
+                    if isStaged {
+                        PanelBadge(text: "Staged", tint: .green)
+                    }
+                }
+                HStack(spacing: 6) {
+                    if let candidate = model.chosenCandidate(for: item) {
+                        ActionTokenRow(tokens: candidate.inputKeys.map(ChordInputValidator.displayToken)).fixedSize()
+                    }
+                    if item.candidates.count > 1 {
+                        Menu {
+                            ForEach(Array(item.candidates.enumerated()), id: \.offset) { index, candidate in
+                                Button(candidate.inputKeys.map(ChordInputValidator.displayToken).joined(separator: " + ")) {
+                                    model.phraseCandidateChoice[item.phrase] = index
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .help("Choose another chord")
+                    }
+                }
+                Text("\(item.frequency)× · \(item.handFrequency) typed fully by hand · one chord instead of \(item.wordCount)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 3)
+    }
+}
+
 // MARK: - Practice
 
 struct PracticeTabView: View {
     @ObservedObject var model: AppModel
     @State private var drill: DrillSession?
+    @State private var speedWords: [String]?
 
     var body: some View {
         Group {
-            if let drill {
+            if let speedWords {
+                SpeedDrillView(
+                    words: speedWords,
+                    onFinish: { result, bigrams in await model.saveSpeedDrill(result, bigrams: bigrams) },
+                    onAgain: { Task { self.speedWords = await model.makeSpeedDrillWords() } },
+                    onClose: { self.speedWords = nil }
+                )
+                .id(speedWords)
+            } else if let drill {
                 DrillView(session: drill) {
                     self.drill = nil
                     Task { await model.loadPracticeReport() }
@@ -322,6 +461,7 @@ struct PracticeTabView: View {
             if !model.hasLoadedPracticeReport {
                 await model.loadPracticeReport()
             }
+            await model.loadSpeedData()
         }
     }
 
@@ -337,6 +477,10 @@ struct PracticeTabView: View {
                 PanelMetric(title: "Chorded", value: "\(report.chordedWords)", detail: "last \(report.windowDays) days")
                 PanelMetric(title: "Typed on M4G", value: "\(report.m4gTypedWords)", detail: "letter by letter")
                 PanelMetric(title: "Other keyboard", value: "\(report.keyboardWords)", detail: "letter by letter")
+            }
+
+            LetterSpeedCard(model: model) {
+                Task { speedWords = await model.makeSpeedDrillWords() }
             }
 
             HStack(spacing: 8) {
@@ -508,6 +652,256 @@ private struct ChordRateBar: View {
         }
         .frame(height: 5)
         .padding(.top, 6)
+    }
+}
+
+// MARK: - Letter speed
+
+/// Letter-by-letter speed on the M4G: the floor that decides whether an
+/// unchorded word sends you back to the laptop keyboard.
+private struct LetterSpeedCard: View {
+    @ObservedObject var model: AppModel
+    let startDrill: () -> Void
+
+    private var summary: String {
+        let usage = model.todayUsage
+        var parts: [String] = []
+        if let m4g = usage.m4gWPM {
+            parts.append("Today on the M4G: \(Int(m4g.rounded())) WPM")
+        } else {
+            parts.append("No M4G letter-by-letter typing today yet")
+        }
+        if let keyboard = usage.keyboardWPM {
+            parts.append("other keyboards \(Int(keyboard.rounded())) WPM")
+        }
+        if let last = model.speedDrillHistory.last {
+            parts.append("last drill \(Int(last.wpm.rounded())) WPM at \(Int((last.accuracy * 100).rounded()))% accuracy")
+        }
+        return parts.joined(separator: " · ") + "."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Letter-by-letter speed")
+                        .font(.headline)
+                    Text(summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Button("Speed drill", action: startDrill)
+                    .buttonStyle(.borderedProminent)
+                    .help("About 14 of your own words, weighted toward your slowest letter pairs. Type them on the M4G without chords.")
+            }
+            if model.speedDrillHistory.count >= 2 {
+                Chart {
+                    ForEach(Array(model.speedDrillHistory.enumerated()), id: \.element.id) { index, result in
+                        LineMark(x: .value("Drill", index + 1), y: .value("WPM", result.wpm))
+                            .foregroundStyle(StatsPalette.m4gTyped)
+                            .lineStyle(StrokeStyle(lineWidth: 2))
+                        PointMark(x: .value("Drill", index + 1), y: .value("WPM", result.wpm))
+                            .foregroundStyle(StatsPalette.m4gTyped)
+                            .symbolSize(18)
+                            .accessibilityLabel("Drill \(index + 1), \(result.finishedAt.formatted(date: .abbreviated, time: .shortened))")
+                            .accessibilityValue("\(Int(result.wpm.rounded())) words per minute, \(Int((result.accuracy * 100).rounded())) percent accurate")
+                    }
+                }
+                .chartXAxis(.hidden)
+                .chartYAxis {
+                    AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { _ in
+                        AxisGridLine().foregroundStyle(StatsPalette.grid)
+                        AxisValueLabel()
+                    }
+                }
+                .frame(height: 70)
+            }
+            if !model.slowBigrams.isEmpty {
+                HStack(spacing: 6) {
+                    Text("Slowest letter pairs:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(model.slowBigrams.prefix(6)) { timing in
+                        Text("\(timing.bigram) \(Int(timing.averageMs.rounded())) ms")
+                            .font(.caption.monospaced())
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(StatsPalette.m4gTyped.opacity(0.14), in: Capsule())
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+/// Type a line of your own words on the M4G, letter by letter. Measures WPM,
+/// accuracy and the time between every pair of letters.
+private struct SpeedDrillView: View {
+    let words: [String]
+    let onFinish: (SpeedDrillResult, [String: (totalMs: Double, count: Int)]) async -> Void
+    let onAgain: () -> Void
+    let onClose: () -> Void
+
+    @State private var typed = ""
+    @State private var log: [(character: Character, time: Date)] = []
+    @State private var result: SpeedDrillResult?
+    @State private var chordBursts = 0
+    @FocusState private var focused: Bool
+
+    private var target: String { words.joined(separator: " ") }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Speed drill")
+                        .font(.headline)
+                    Text("Type on your Master Forge, letter by letter, no chords. The timer starts on your first key.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Done", action: onClose)
+            }
+
+            if let result {
+                summary(result)
+            } else {
+                Text(progressText)
+                    .font(.system(size: 22, weight: .regular, design: .monospaced))
+                    .lineSpacing(6)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel("Type: \(target)")
+                TextField("Start typing…", text: $typed)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 18, design: .monospaced))
+                    .focused($focused)
+                    .onChange(of: typed) { value in record(value) }
+                    .onSubmit { finish() }
+            }
+            Spacer(minLength: 0)
+        }
+        .onAppear { DispatchQueue.main.async { focused = true } }
+    }
+
+    private var progressText: AttributedString {
+        var text = AttributedString()
+        let targetCharacters = Array(target)
+        let typedCharacters = Array(typed)
+        for (index, character) in targetCharacters.enumerated() {
+            var piece = AttributedString(String(character))
+            if index < typedCharacters.count {
+                if typedCharacters[index] == character {
+                    piece.foregroundColor = .primary
+                } else {
+                    piece.foregroundColor = .red
+                    piece.underlineStyle = .single
+                }
+            } else if index == typedCharacters.count {
+                piece.foregroundColor = .primary
+                piece.backgroundColor = StatsPalette.m4gTyped.opacity(0.25)
+            } else {
+                piece.foregroundColor = .secondary
+            }
+            text += piece
+        }
+        return text
+    }
+
+    private func summary(_ result: SpeedDrillResult) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 18) {
+                VStack(alignment: .leading) {
+                    Text("\(Int(result.wpm.rounded())) WPM")
+                        .font(.system(.largeTitle, design: .rounded).weight(.semibold))
+                    Text("letter by letter")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                VStack(alignment: .leading) {
+                    Text("\(Int((result.accuracy * 100).rounded()))%")
+                        .font(.system(.title, design: .rounded).weight(.semibold))
+                    Text("accuracy")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if !result.slowBigrams.isEmpty {
+                Text("Slowest letter pairs this run: " + result.slowBigrams.map { "\($0.bigram) \(Int($0.averageMs.rounded())) ms" }.joined(separator: ", "))
+                    .font(.callout)
+            }
+            if chordBursts > 0 {
+                Label("\(chordBursts) chord output\(chordBursts == 1 ? "" : "s") detected; those letters were left out of the timing.", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text("Next drills lean on your slowest pairs. A few short drills a day beat one long one; accuracy first, speed follows.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Again with new words", action: onAgain)
+                    .buttonStyle(.borderedProminent)
+                Button("Done", action: onClose)
+            }
+        }
+    }
+
+    private func record(_ value: String) {
+        let now = Date()
+        if value.count < log.count {
+            log.removeLast(log.count - value.count)
+        } else if value.count > log.count {
+            for character in value.dropFirst(log.count) {
+                log.append((character, now))
+            }
+        }
+        if value.count >= target.count {
+            finish()
+        }
+    }
+
+    private func finish() {
+        guard result == nil, let first = log.first, let last = log.last else { return }
+        let targetCharacters = Array(target)
+        let typedCharacters = Array(typed)
+        let correct = zip(typedCharacters, targetCharacters).filter { $0 == $1 }.count
+        let accuracy = Double(correct) / Double(max(targetCharacters.count, typedCharacters.count))
+
+        // Letters that arrived within a few milliseconds of each other came
+        // from a chord, not from fingers; leave them out of the timing.
+        var clean: [(character: Character, time: Date)] = []
+        var bursts = 0
+        for (index, entry) in log.enumerated() {
+            let isBurst = index > 0 && entry.time.timeIntervalSince(log[index - 1].time) < 0.012
+            if isBurst {
+                bursts += 1
+                continue
+            }
+            if index < targetCharacters.count, entry.character == targetCharacters[index] {
+                clean.append(entry)
+            }
+        }
+        chordBursts = bursts > 2 ? bursts : 0
+
+        let elapsed = max(last.time.timeIntervalSince(first.time), 1)
+        let wpm = (Double(correct) / 5) / (elapsed / 60)
+        let bigrams = SpeedDrillBuilder.bigramTimings(typed: clean)
+        let slow = bigrams
+            .map { BigramTiming(bigram: $0.key, averageMs: $0.value.totalMs / Double($0.value.count), count: $0.value.count) }
+            .sorted { $0.averageMs > $1.averageMs }
+            .prefix(5)
+        let drillResult = SpeedDrillResult(
+            wpm: wpm,
+            accuracy: accuracy,
+            characters: typedCharacters.count,
+            slowBigrams: Array(slow)
+        )
+        result = drillResult
+        Task { await onFinish(drillResult, bigrams) }
     }
 }
 

@@ -3,6 +3,21 @@ import Library
 
 public typealias TypingRecorder = UsageRecorder
 
+/// One word as the recorder stored it, for live coaching.
+public struct RecordedWord: Sendable {
+    public let word: String
+    public let source: UsageSource
+    public let avgMs: Double
+    public let language: WordLanguage
+
+    public init(word: String, source: UsageSource, avgMs: Double, language: WordLanguage) {
+        self.word = word
+        self.source = source
+        self.avgMs = avgMs
+        self.language = language
+    }
+}
+
 public actor UsageRecorder {
     private struct BufferedCharacter {
         let character: Character
@@ -17,6 +32,9 @@ public actor UsageRecorder {
         let characters: [BufferedCharacter]
         let endedAt: Date
         var trailingDelimiters: Int
+        /// Exactly what was typed after the word. A single space means the
+        /// next word continues the same phrase.
+        var delimiters = ""
     }
 
     private let libraryService: LibraryService
@@ -27,6 +45,10 @@ public actor UsageRecorder {
     /// Counts for the correction rate, written at word boundaries.
     private var pendingKeystrokes = 0
     private var pendingBackspaces = 0
+    /// The last few words written with single spaces between them.
+    private var phraseRun: [(word: String, handTyped: Bool)] = []
+    private var previousWordJoinsNext = false
+    private var wordObserver: (@Sendable (RecordedWord) -> Void)?
 
     private let newWordThreshold: TimeInterval = 5.0
     /// Upper bound for the gap between characters of one chord output.
@@ -34,6 +56,10 @@ public actor UsageRecorder {
 
     public init(libraryService: LibraryService) {
         self.libraryService = libraryService
+    }
+
+    public func setWordObserver(_ observer: (@Sendable (RecordedWord) -> Void)?) {
+        wordObserver = observer
     }
 
     public func updateDeviceChords(_ chords: [ChordEntry]) {
@@ -72,7 +98,7 @@ public actor UsageRecorder {
                     await finishWord(endedAt: last.timestamp)
                 }
                 if buffer.isEmpty {
-                    await commitPendingWord()
+                    await commitPendingWord(nextWordStarted: true)
                 }
                 buffer.append(
                     BufferedCharacter(
@@ -84,8 +110,10 @@ public actor UsageRecorder {
             } else if !buffer.isEmpty {
                 await finishWord(endedAt: timestamp)
                 pendingWord?.trailingDelimiters += 1
+                pendingWord?.delimiters.append(character)
             } else if pendingWord != nil {
                 pendingWord?.trailingDelimiters += 1
+                pendingWord?.delimiters.append(character)
             }
             scheduleIdleFlush()
         }
@@ -97,6 +125,9 @@ public actor UsageRecorder {
             buffer.removeLast()
         } else if var pending = pendingWord {
             pending.trailingDelimiters -= 1
+            if !pending.delimiters.isEmpty {
+                pending.delimiters.removeLast()
+            }
             if pending.trailingDelimiters <= 0 {
                 buffer = pending.characters
                 pendingWord = nil
@@ -197,17 +228,23 @@ public actor UsageRecorder {
         pendingWord = PendingWord(characters: buffer, endedAt: endedAt, trailingDelimiters: 0)
         buffer = []
         if let previous {
-            await persist(previous.characters, endedAt: previous.endedAt)
+            await persist(previous.characters, endedAt: previous.endedAt, joinsNext: false)
         }
     }
 
-    private func commitPendingWord() async {
+    /// Persists the held-back word. `nextWordStarted` is true only when a new
+    /// word begins; with a single space between them the two form a phrase.
+    private func commitPendingWord(nextWordStarted: Bool = false) async {
         guard let pending = pendingWord else { return }
         pendingWord = nil
-        await persist(pending.characters, endedAt: pending.endedAt)
+        await persist(
+            pending.characters,
+            endedAt: pending.endedAt,
+            joinsNext: nextWordStarted && pending.delimiters == " "
+        )
     }
 
-    private func persist(_ characters: [BufferedCharacter], endedAt: Date) async {
+    private func persist(_ characters: [BufferedCharacter], endedAt: Date, joinsNext: Bool) async {
         let rawText = String(characters.map(\.character))
         let words = MultilingualWordProcessor.words(in: rawText)
         guard !words.isEmpty else { return }
@@ -226,10 +263,13 @@ public actor UsageRecorder {
                 startedAt: startedAt,
                 endedAt: endedAt
             )
+            await notePhraseWord(word, handTyped: false, joinsNext: joinsNext, at: endedAt)
+            wordObserver?(RecordedWord(word: word, source: .m4gHIDConfirmed, avgMs: avgMs, language: words[0].language))
             return
         }
 
         guard characters.allSatisfy({ $0.source != .unknown }) else {
+            previousWordJoinsNext = false
             return
         }
         let source: UsageSource = characters.allSatisfy({ $0.source == .m4g })
@@ -242,6 +282,33 @@ public actor UsageRecorder {
                 avgMs: avgMs / Double(words.count),
                 source: source,
                 lastUsedAt: endedAt
+            )
+            wordObserver?(RecordedWord(word: word.text, source: source, avgMs: avgMs / Double(words.count), language: word.language))
+        }
+        if words.count == 1, let word = words.first?.text {
+            await notePhraseWord(word, handTyped: true, joinsNext: joinsNext, at: endedAt)
+        } else {
+            phraseRun = []
+            previousWordJoinsNext = false
+        }
+    }
+
+    /// Counts the two- and three-word phrases ending at this word.
+    private func notePhraseWord(_ word: String, handTyped: Bool, joinsNext: Bool, at date: Date) async {
+        if !previousWordJoinsNext {
+            phraseRun = []
+        }
+        phraseRun.append((word, handTyped))
+        if phraseRun.count > 3 {
+            phraseRun.removeFirst(phraseRun.count - 3)
+        }
+        previousWordJoinsNext = joinsNext
+        for length in [2, 3] where phraseRun.count >= length {
+            let slice = phraseRun.suffix(length)
+            try? await libraryService.recordPhrase(
+                slice.map(\.word),
+                handTyped: slice.allSatisfy(\.handTyped),
+                lastUsedAt: date
             )
         }
     }

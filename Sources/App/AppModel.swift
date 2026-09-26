@@ -127,6 +127,25 @@ final class AppModel: ObservableObject {
     @Published var growthSelection: Set<String> = []
     @Published var growthWindowDays = 30
     @Published private(set) var practiceReport = PracticeReport.empty
+    @Published var coachSettings = CoachSettings()
+    @Published var showChordRateInMenuBar = true
+    @Published private(set) var todayUsage = TodayUsage()
+    @Published private(set) var currentNudge: Nudge?
+    @Published private(set) var coachSnapshot = CoachingSnapshot.empty
+    @Published var growMode: GrowMode = .words
+    @Published private(set) var phrasePlan: [PhraseItem] = []
+    @Published private(set) var isPlanningPhrases = false
+    @Published private(set) var hasLoadedPhrasePlan = false
+    @Published var phraseSelection: Set<String> = []
+    @Published var phraseCandidateChoice: [String: Int] = [:]
+    @Published private(set) var speedDrillHistory: [SpeedDrillResult] = []
+    @Published private(set) var slowBigrams: [BigramTiming] = []
+    private var coachEngine = CoachEngine()
+    /// Updated on every word; published to `todayUsage` at most every few
+    /// seconds so the panel and menu bar don't redraw per keystroke.
+    private var liveTodayUsage = TodayUsage()
+    private var todayPublishTask: Task<Void, Never>?
+    private var coachRefreshTask: Task<Void, Never>?
     @Published var statsPeriod: StatsPeriod = .month
     @Published private(set) var statsReport = StatsReport.empty(.month)
     @Published private(set) var isLoadingStats = false
@@ -172,6 +191,7 @@ final class AppModel: ObservableObject {
             }
             await refresh()
             engine.start()
+            await startCoaching()
             if inputObservationEnabled {
                 inputObserver.start()
             }
@@ -182,6 +202,215 @@ final class AppModel: ObservableObject {
     func stop() {
         engine.stop()
         inputObserver.stop()
+        coachRefreshTask?.cancel()
+    }
+
+    // MARK: Live coaching
+
+    enum GrowMode: String, CaseIterable, Identifiable {
+        case words = "Words"
+        case phrases = "Phrases"
+        var id: String { rawValue }
+    }
+
+    /// Hooks the recorder to the coach and keeps the coach's lookups fresh.
+    func startCoaching() async {
+        await loadCoachSettings()
+        let observer: @Sendable (RecordedWord) -> Void = { [weak self] event in
+            Task { @MainActor in self?.handleRecordedWord(event) }
+        }
+        await recorder.setWordObserver(observer)
+        try? await libraryService.pruneRarePhrases()
+        await refreshCoaching()
+        coachRefreshTask?.cancel()
+        coachRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30 * 60 * 1_000_000_000)
+                await self?.refreshCoaching()
+            }
+        }
+    }
+
+    func refreshCoaching() async {
+        do {
+            let snapshot = try await libraryService.coachingSnapshot()
+            coachSnapshot = snapshot
+            liveTodayUsage = try await libraryService.todayUsage(goalWords: snapshot.goalWords)
+            todayUsage = liveTodayUsage
+        } catch {
+            lastError = error.localizedDescription
+        }
+        if !hasLoadedGrowthPlan {
+            await loadGrowthPlan()
+        }
+    }
+
+    func handleRecordedWord(_ event: RecordedWord) {
+        if !Calendar.current.isDateInToday(liveTodayUsage.day) {
+            liveTodayUsage = TodayUsage()
+        }
+        liveTodayUsage.record(
+            word: event.word,
+            source: event.source,
+            avgMs: event.avgMs,
+            isGoalWord: coachSnapshot.goalWords.contains(event.word)
+        )
+        if todayPublishTask == nil {
+            todayPublishTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self else { return }
+                self.todayUsage = self.liveTodayUsage
+                self.todayPublishTask = nil
+            }
+        }
+        guard let nudge = coachEngine.nudge(
+            for: event,
+            handCountToday: liveTodayUsage.handCounts[event.word] ?? 0,
+            snapshot: coachSnapshot,
+            suggestions: growthSuggestionInputs,
+            settings: coachSettings
+        ) else { return }
+        currentNudge = nudge
+    }
+
+    /// First-choice chords for the words Grow ranks highest.
+    private var growthSuggestionInputs: [String: [String]] {
+        Dictionary(
+            growthPlan.items.prefix(60).compactMap { item in
+                chosenCandidate(for: item).map { (item.word, $0.inputKeys) }
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+    }
+
+    func skipGrowthWord(named word: String) async {
+        do {
+            try await libraryService.setGrowthWordSkipped(word, skipped: true)
+            statusText = "\(word) will not be suggested again"
+            if hasLoadedGrowthPlan {
+                await loadGrowthPlan()
+            }
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func saveCoachSettings() async {
+        let keys = CoachSettings.storageKeys
+        do {
+            try await libraryService.setSetting(keys.enabled, value: coachSettings.enabled ? "1" : "0")
+            try await libraryService.setSetting(keys.forgotten, value: coachSettings.forgotten ? "1" : "0")
+            try await libraryService.setSetting(keys.typos, value: coachSettings.typos ? "1" : "0")
+            try await libraryService.setSetting(keys.suggestions, value: coachSettings.suggestions ? "1" : "0")
+            try await libraryService.setSetting(keys.m4gOnly, value: coachSettings.m4gOnly ? "1" : "0")
+            try await libraryService.setSetting(keys.maxPerHour, value: String(coachSettings.maxPerHour))
+            try await libraryService.setSetting("menubar.chord_rate", value: showChordRateInMenuBar ? "1" : "0")
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func loadCoachSettings() async {
+        let keys = CoachSettings.storageKeys
+        func flag(_ key: String, default value: Bool) async -> Bool {
+            guard let stored = try? await libraryService.stringSetting(forKey: key) else { return value }
+            return stored == "1"
+        }
+        var settings = CoachSettings()
+        settings.enabled = await flag(keys.enabled, default: true)
+        settings.forgotten = await flag(keys.forgotten, default: true)
+        settings.typos = await flag(keys.typos, default: true)
+        settings.suggestions = await flag(keys.suggestions, default: true)
+        settings.m4gOnly = await flag(keys.m4gOnly, default: false)
+        if let stored = try? await libraryService.stringSetting(forKey: keys.maxPerHour), let value = Int(stored) {
+            settings.maxPerHour = value
+        }
+        coachSettings = settings
+        showChordRateInMenuBar = await flag("menubar.chord_rate", default: true)
+    }
+
+    // MARK: Phrases
+
+    func loadPhrasePlan() async {
+        guard !isPlanningPhrases else { return }
+        isPlanningPhrases = true
+        defer { isPlanningPhrases = false }
+        do {
+            phrasePlan = try await libraryService.phrasePlan(days: growthWindowDays)
+            hasLoadedPhrasePlan = true
+            let phrases = Set(phrasePlan.map(\.phrase))
+            phraseSelection.formIntersection(phrases)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func chosenCandidate(for item: PhraseItem) -> Candidate? {
+        let index = phraseCandidateChoice[item.phrase] ?? 0
+        return item.candidates.indices.contains(index) ? item.candidates[index] : item.candidates.first
+    }
+
+    func stageSelectedPhrases() {
+        let items = phrasePlan.filter { phraseSelection.contains($0.phrase) }
+        var accepted: [String] = []
+        var rejected: [String] = []
+        for item in items {
+            guard let candidate = chosenCandidate(for: item) else { continue }
+            let knownChords = chords + stagedChanges.filter { $0.kind == .upsert }.map(\.chord)
+            let validation = ChordInputValidator.validateM4GDeviceTokens(candidate.inputKeys, existingChords: knownChords)
+            guard validation.isValid else {
+                rejected.append("\(item.phrase): \(validation.errors.first ?? "invalid input")")
+                continue
+            }
+            stagedChanges.append(
+                StagedChordChange(
+                    kind: .upsert,
+                    chord: ChordEntry(
+                        inputKeys: validation.tokens,
+                        output: item.phrase,
+                        profile: .cc2A1,
+                        deploymentTarget: .device,
+                        source: "grow_phrase"
+                    )
+                )
+            )
+            accepted.append(item.phrase)
+        }
+        phraseSelection.subtract(accepted)
+        if !rejected.isEmpty {
+            lastError = "Some phrase chords were not staged:\n" + rejected.joined(separator: "\n")
+        }
+        statusText = "Staged \(accepted.count) phrase chord\(accepted.count == 1 ? "" : "s"). Review, then Commit."
+    }
+
+    // MARK: Letter speed
+
+    func loadSpeedData() async {
+        do {
+            speedDrillHistory = try await libraryService.speedDrillHistory()
+            slowBigrams = try await libraryService.slowestDrillBigrams()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func makeSpeedDrillWords() async -> [String] {
+        let pool = (try? await libraryService.speedDrillWordPool()) ?? []
+        let fallback = ["the", "that", "with", "have", "this", "from", "they", "would", "there", "their",
+                        "about", "which", "when", "make", "like", "time", "just", "know", "people", "into"]
+        return SpeedDrillBuilder.words(
+            pool: pool.count >= 20 ? pool : fallback,
+            slowBigrams: slowBigrams.map(\.bigram)
+        )
+    }
+
+    func saveSpeedDrill(_ result: SpeedDrillResult, bigrams: [String: (totalMs: Double, count: Int)]) async {
+        do {
+            try await libraryService.saveSpeedDrill(result, bigrams: bigrams)
+            await loadSpeedData()
+        } catch {
+            lastError = error.localizedDescription
+        }
     }
 
     func refresh() async {
@@ -816,6 +1045,10 @@ final class AppModel: ObservableObject {
         if hasLoadedGrowthPlan {
             await loadGrowthPlan()
         }
+        if hasLoadedPhrasePlan {
+            await loadPhrasePlan()
+        }
+        await refreshCoaching()
         if hasLoadedPracticeReport {
             await loadPracticeReport()
         }

@@ -1368,7 +1368,7 @@ extension LibraryService {
     private static let learnedChordsSettingKey = "practice.learned_chord_ids.v1"
     /// Chord sources that mean "added from Chordsmith", as opposed to the
     /// library imported from the device.
-    private static let addedChordSources = ["grow", "advisor", "quick_add", "suggestion", "user"]
+    static let addedChordSources = ["grow", "grow_phrase", "advisor", "quick_add", "suggestion", "user"]
 
     /// Recorded words in the window, split into letter-by-letter and chorded
     /// uses. Nexus imports carry no timing split and are left out.
@@ -1768,7 +1768,7 @@ extension LibraryService {
 
         let chords = try deviceChords()
         let addedChordDays = chords
-            .filter { ["grow", "advisor", "quick_add", "suggestion", "user"].contains($0.source) && $0.createdAt >= builder.previousStart }
+            .filter { Self.addedChordSources.contains($0.source) && $0.createdAt >= builder.previousStart }
             .map { usageDay(for: $0.createdAt) }
         let chordsByWord = GrowthPlanner.chordsByOutputWord(chords)
         let chordInputs = chordsByWord.compactMapValues { $0.first.map(GrowthPlanner.displayInput) }
@@ -1811,6 +1811,232 @@ extension LibraryService {
         }
         typoWordCache = (Date(), typos)
         return typos
+    }
+}
+
+// MARK: - Phrases, live coaching and speed drills
+
+extension LibraryService {
+    public func recordPhrase(_ words: [String], handTyped: Bool, lastUsedAt: Date = .now) throws {
+        guard words.count >= 2 else { return }
+        let phrase = words.joined(separator: " ")
+        try database.execute(
+            """
+            INSERT INTO daily_phrase_stats (day, phrase, word_count, frequency, hand_frequency)
+            VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT(day, phrase) DO UPDATE SET
+                frequency = frequency + 1,
+                hand_frequency = hand_frequency + excluded.hand_frequency
+            """,
+            bindings: [
+                .text(usageDay(for: lastUsedAt)),
+                .text(phrase),
+                .integer(Int64(words.count)),
+                .integer(handTyped ? 1 : 0)
+            ]
+        )
+    }
+
+    public func phraseUsage(days: Int?, now: Date = .now) throws -> [PhraseUsage] {
+        var sql = """
+            SELECT phrase, MAX(word_count) AS word_count,
+                   SUM(frequency) AS frequency, SUM(hand_frequency) AS hand_frequency
+            FROM daily_phrase_stats
+            """
+        var bindings: [SQLiteValue] = []
+        if let days {
+            let start = Calendar.current.date(byAdding: .day, value: -(max(days, 1) - 1), to: now) ?? now
+            sql += " WHERE day >= ?"
+            bindings.append(.text(usageDay(for: start)))
+        }
+        sql += " GROUP BY phrase ORDER BY frequency DESC"
+        return try database.query(sql, bindings: bindings).compactMap { row in
+            guard let phrase = row.string("phrase"),
+                  let wordCount = row.integer("word_count"),
+                  let frequency = row.integer("frequency") else { return nil }
+            return PhraseUsage(
+                phrase: phrase,
+                wordCount: Int(wordCount),
+                frequency: Int(frequency),
+                handFrequency: Int(row.integer("hand_frequency") ?? 0)
+            )
+        }
+    }
+
+    /// Phrases seen once and never again within two weeks are dropped, so the
+    /// table keeps habits, not the content of what you wrote.
+    public func pruneRarePhrases(olderThanDays days: Int = 14, now: Date = .now) throws {
+        let cutoff = usageDay(for: Calendar.current.date(byAdding: .day, value: -days, to: now) ?? now)
+        try database.execute(
+            """
+            DELETE FROM daily_phrase_stats
+            WHERE day < ? AND phrase IN (
+                SELECT phrase FROM daily_phrase_stats GROUP BY phrase HAVING SUM(frequency) < 2
+            )
+            """,
+            bindings: [.text(cutoff)]
+        )
+    }
+
+    public func phrasePlan(days: Int = 30, limit: Int = 40, now: Date = .now) throws -> [PhraseItem] {
+        let usage = try wordSourceUsage(days: days, now: now)
+        var wordAvgMs: [String: Double] = [:]
+        for entry in usage where entry.typedFrequency > 0 {
+            wordAvgMs[entry.word] = min(entry.typedAvgMs, GrowthPlanner.avgMsCap)
+        }
+        return GrowthPlanner(engine: suggestionEngine).planPhrases(
+            phrases: try phraseUsage(days: days, now: now),
+            wordAvgMs: wordAvgMs,
+            existingChords: try deviceChords(),
+            bannedInputs: try bannedInputs(),
+            dictionary: GrowthPlanner.loadSystemDictionary(),
+            limit: limit
+        )
+    }
+
+    /// What the live coach looks up on every word.
+    public func coachingSnapshot(goalSize: Int = 50, now: Date = .now) throws -> CoachingSnapshot {
+        let chords = try deviceChords()
+        let chordsByWord = GrowthPlanner.chordsByOutputWord(chords)
+        let chordInputs = chordsByWord.compactMapValues { $0.first.map(GrowthPlanner.displayInput) }
+
+        let usage = try wordSourceUsage(days: nil, now: now)
+        let aliases = try wordAliases()
+        let dictionary = GrowthPlanner.loadSystemDictionary()
+        let knownFrequency = Dictionary(usage.map { ($0.word, $0.frequency) }, uniquingKeysWith: +)
+        var typoTargets: [String: String] = [:]
+        for entry in usage where entry.language == .english && entry.word.count >= 3 && aliases[entry.word] == nil {
+            if let intended = GrowthPlanner.intendedWord(
+                forTypo: entry.word,
+                frequency: entry.frequency,
+                chordedWords: chordsByWord,
+                knownFrequency: knownFrequency,
+                dictionary: dictionary
+            ), chordInputs[intended] != nil {
+                typoTargets[entry.word] = intended
+            }
+        }
+
+        let recent = try wordSourceUsage(days: 30, now: now)
+        let goalWords = recent
+            .filter { chordInputs[$0.word] != nil && $0.word.count >= 2 }
+            .sorted { $0.frequency > $1.frequency }
+            .prefix(goalSize)
+            .map(\.word)
+        return CoachingSnapshot(chordInputs: chordInputs, typoTargets: typoTargets, goalWords: Set(goalWords))
+    }
+
+    /// Today's recorded words, replayed into the running totals.
+    public func todayUsage(goalWords: Set<String>, now: Date = .now) throws -> TodayUsage {
+        let rows = try database.query(
+            """
+            SELECT word, source, SUM(frequency) AS frequency,
+                   SUM(avg_ms * frequency) / SUM(frequency) AS avg_ms
+            FROM daily_word_stats
+            WHERE day = ?
+            GROUP BY word, source
+            """,
+            bindings: [.text(usageDay(for: now))]
+        )
+        var today = TodayUsage(day: now)
+        for row in rows {
+            guard let word = row.string("word"),
+                  let source = row.string("source").flatMap(UsageSource.init(rawValue:)),
+                  let frequency = row.integer("frequency"),
+                  let avgMs = row.double("avg_ms") else { continue }
+            for _ in 0..<Int(frequency) {
+                today.record(word: word, source: source, avgMs: avgMs, isGoalWord: goalWords.contains(word))
+            }
+        }
+        return today
+    }
+
+    public func saveSpeedDrill(_ result: SpeedDrillResult, bigrams: [String: (totalMs: Double, count: Int)]) throws {
+        let slowJSON = try String(decoding: encoder.encode(result.slowBigrams), as: UTF8.self)
+        try database.transaction {
+            try database.execute(
+                """
+                INSERT OR REPLACE INTO speed_drills (id, finished_at, wpm, accuracy, characters, slow_bigrams_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                bindings: [
+                    .text(result.id.uuidString),
+                    .double(result.finishedAt.timeIntervalSince1970),
+                    .double(result.wpm),
+                    .double(result.accuracy),
+                    .integer(Int64(result.characters)),
+                    .text(slowJSON)
+                ]
+            )
+            for (bigram, timing) in bigrams {
+                try database.execute(
+                    """
+                    INSERT INTO drill_bigrams (bigram, total_ms, count) VALUES (?, ?, ?)
+                    ON CONFLICT(bigram) DO UPDATE SET
+                        total_ms = total_ms + excluded.total_ms,
+                        count = count + excluded.count
+                    """,
+                    bindings: [.text(bigram), .double(timing.totalMs), .integer(Int64(timing.count))]
+                )
+            }
+        }
+    }
+
+    public func speedDrillHistory(limit: Int = 60) throws -> [SpeedDrillResult] {
+        try database.query(
+            """
+            SELECT id, finished_at, wpm, accuracy, characters, slow_bigrams_json
+            FROM speed_drills ORDER BY finished_at DESC LIMIT ?
+            """,
+            bindings: [.integer(Int64(limit))]
+        ).compactMap { row in
+            guard let idText = row.string("id"), let id = UUID(uuidString: idText),
+                  let finishedAt = row.double("finished_at"),
+                  let wpm = row.double("wpm"),
+                  let accuracy = row.double("accuracy") else { return nil }
+            let slow = (try? decoder.decode([BigramTiming].self, from: Data((row.string("slow_bigrams_json") ?? "[]").utf8))) ?? []
+            return SpeedDrillResult(
+                id: id,
+                finishedAt: Date(timeIntervalSince1970: finishedAt),
+                wpm: wpm,
+                accuracy: accuracy,
+                characters: Int(row.integer("characters") ?? 0),
+                slowBigrams: slow
+            )
+        }
+        .reversed()
+    }
+
+    /// Letter pairs you are slowest at across all drills.
+    public func slowestDrillBigrams(limit: Int = 8, minimumCount: Int = 4) throws -> [BigramTiming] {
+        try database.query(
+            """
+            SELECT bigram, total_ms / count AS average_ms, count
+            FROM drill_bigrams WHERE count >= ?
+            ORDER BY average_ms DESC LIMIT ?
+            """,
+            bindings: [.integer(Int64(minimumCount)), .integer(Int64(limit))]
+        ).compactMap { row in
+            guard let bigram = row.string("bigram"), let average = row.double("average_ms") else { return nil }
+            return BigramTiming(bigram: bigram, averageMs: average, count: Int(row.integer("count") ?? 0))
+        }
+    }
+
+    /// Words worth practising letter by letter: the English words you type
+    /// by hand most often, typos and fragments excluded.
+    public func speedDrillWordPool(days: Int = 30, now: Date = .now) throws -> [String] {
+        let dictionary = GrowthPlanner.loadSystemDictionary()
+        return try wordSourceUsage(days: days, now: now)
+            .filter { entry in
+                entry.language == .english
+                    && entry.typedFrequency >= 2
+                    && (3...10).contains(entry.word.count)
+                    && entry.word.allSatisfy(\.isLetter)
+                    && (dictionary.isEmpty || dictionary.contains(entry.word))
+            }
+            .sorted { $0.typedFrequency > $1.typedFrequency }
+            .prefix(300)
+            .map(\.word)
     }
 }
 

@@ -185,7 +185,7 @@ public struct GrowthPlanner: Sendable {
     /// was never typed slower than this is a leftover chord fragment.
     static let fragmentMaxAvgMs: Double = 90
 
-    private let engine: SuggestionEngine
+    let engine: SuggestionEngine
     private let morphology: EnglishMorphologyIndex
 
     public init(engine: SuggestionEngine = SuggestionEngine(), morphology: EnglishMorphologyIndex = .bundled) {

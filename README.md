@@ -47,6 +47,37 @@ The **Practice** tab turns the recorder's data into drills:
 - **Drills** of five words at a time: chord each word into the field, see your
   time and chords per minute, repeat with the chord hidden, then move on.
 
+## Live Coaching
+
+While you type anywhere, Chordsmith can show a small hint under the menu bar
+at the moment a chord would have been faster:
+
+- a word you already have a chord for (`exit → i+x`);
+- a typo of a chorded word (`hte → the`);
+- a word you have typed by hand three times today that Grow has a chord for,
+  with **Add chord** to write it to the M4G straight away.
+
+Hints never take focus and fade on their own. They are rate-limited (20
+seconds apart, 10 minutes per word, a per-hour cap you choose) and can be
+limited to typing on the Master Forge. Configure them in Settings › Live
+coaching.
+
+The menu bar shows today's chord rate next to the icon; its tooltip adds the
+goal (90% of your 50 most-used chorded words) and today's M4G letter speed.
+
+## Phrase Chords
+
+Grow › Phrases lists two- and three-word phrases you write at least four times
+in the window, each with a chord made from the first letter of every word plus
+space (`can you` → `c + y + space`), conflict-free across the batch.
+
+## Letter-By-Letter Speed
+
+Practice shows today's letter-by-letter speed on the M4G next to other
+keyboards, a history of speed drills, and your slowest letter pairs. A speed
+drill is about fourteen of your own words, weighted toward those slow pairs;
+type them on the M4G without chords to get WPM, accuracy and per-pair timing.
+
 ## Stats
 
 The **Stats** tab puts every metric in one place for the last 7 days, 30
@@ -149,6 +180,9 @@ swift test
 Chordsmith Mac stores local app data under macOS Application Support. The advisor runs locally and does not require an AI service or network access for chord generation.
 
 The usage recorder requires macOS Input Monitoring permission. A Master Forge is one logical device made from separately enumerated left (`m4g_s3`) and right (`m4gr_s3`) digitizer halves. Chordsmith recognizes both halves by their USB HID descriptor and correlates each half's key-down with the corresponding macOS keyboard event. Unmatched events are recorded as normal keyboard input; if physical attribution is unavailable, the recorder does not save the word. The Usage tab shows whether one or both Master Forge halves are available for physical attribution.
+
+Two- and three-word phrases are stored the same way, as per-day counts only,
+for phrase chords. Phrases seen once and not again within 14 days are deleted.
 
 Words stay editable until the next word starts: backspacing into a word you
 just finished (as CCOS suffix modifiers and quick typo fixes do) reopens it, and
