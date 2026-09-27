@@ -321,6 +321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             panel.isOpaque = false
             panel.backgroundColor = .clear
+            panel.hasShadow = true
             panel.isReleasedWhenClosed = false
             quickChordPanel = panel
         }

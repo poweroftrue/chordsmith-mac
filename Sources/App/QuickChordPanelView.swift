@@ -324,7 +324,7 @@ struct QuickChordAddView: View {
     var showsCancel = true
     var contentPadding: CGFloat = 14
     var focusToken = 0
-    var initialFocus: QuickChordEditorInitialFocus = .input
+    var initialFocus: QuickChordEditorInitialFocus = .output
     let onCancel: () -> Void
     let onCommitSuccess: () -> Void
 
@@ -347,56 +347,41 @@ struct QuickChordAddView: View {
         controller.replacementChord(in: model)
     }
 
+    private var word: String {
+        controller.outputText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Chords that already type this word, so you don't add a second one
+    /// by accident.
+    private var existingChords: [ChordEntry] {
+        guard !word.isEmpty, controller.outputMode == .plain else { return [] }
+        let target = word.lowercased()
+        return controller.quickChords(in: model).filter { chord in
+            chord.id != controller.editingChord?.id
+                && (chord.plainOutput ?? chord.output).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == target
+        }
+    }
+
+    /// The keys you entered already type exactly this word.
+    private var isDuplicate: Bool {
+        guard let replacementChord, controller.editingChord == nil, controller.outputMode == .plain else { return false }
+        return (replacementChord.plainOutput ?? replacementChord.output)
+            .trimmingCharacters(in: .whitespacesAndNewlines) == word
+    }
+
+    private var isLocked: Bool {
+        controller.editingChord.map { !AppModel.isQuickEditablePlainDeviceChord($0) } ?? false
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Input")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                HStack {
-                    TextField("i+dup", text: $controller.inputText)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($focusedField, equals: .input)
-                    Button {
-                        controller.captureActive.toggle()
-                        if controller.captureActive {
-                            focusedField = nil
-                        }
-                    } label: {
-                        Image(systemName: controller.captureActive ? "keyboard.badge.eye.fill" : "keyboard.badge.eye")
-                    }
-                    .buttonStyle(.bordered)
-                    .help("Capture OS-visible keys")
-                }
-                tokenPreview
+        VStack(alignment: .leading, spacing: 14) {
+            wordSection
+            if controller.editingChord == nil, controller.outputMode == .plain, word.count >= 2 {
+                suggestionsSection
             }
-
-            quickAdvisorContent
-
-            outputEditor
-
-            if let replacementChord, controller.editingChord == nil {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                    Text(controller.outputMode == .actions || AppModel.isQuickEditablePlainDeviceChord(replacementChord)
-                         ? "Will replace \(replacementChord.output)"
-                         : "Switch to Actions to replace this macro chord")
-                }
-                .font(.caption)
-                .foregroundStyle(.orange)
-            }
-
-            if !validation.errors.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(validation.errors, id: \.self) { error in
-                        Label(error, systemImage: "exclamationmark.triangle.fill")
-                    }
-                }
-                .font(.caption)
-                .foregroundStyle(.red)
-            }
-
-            HStack {
+            keysSection
+            messages
+            HStack(spacing: 8) {
                 Spacer()
                 if showsCancel {
                     Button("Cancel") {
@@ -408,20 +393,19 @@ struct QuickChordAddView: View {
                     Task { await save() }
                 } label: {
                     if controller.isCommitting {
-                        ProgressView()
-                            .scaleEffect(0.7)
+                        ProgressView().controlSize(.small)
                     } else {
-                        Text(controller.saveButtonTitle(in: model))
+                        Text(isDuplicate ? "Already added" : saveTitle)
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(controller.isSaveDisabled(in: model))
+                .disabled(controller.isSaveDisabled(in: model) || isDuplicate)
             }
         }
         .padding(contentPadding)
         .onAppear {
             scheduleInitialFocus()
-            if !controller.outputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if !word.isEmpty, controller.quickCandidates.isEmpty {
                 controller.scheduleQuickAdvisor(model: model, immediate: true)
             }
         }
@@ -440,7 +424,7 @@ struct QuickChordAddView: View {
         .onChange(of: controller.inputText) { newValue in
             controller.inputTextChanged(newValue)
         }
-        .alert("Quick Chord", isPresented: Binding(
+        .alert("Couldn't save the chord", isPresented: Binding(
             get: { controller.localError != nil },
             set: { newValue in
                 if !newValue {
@@ -456,28 +440,33 @@ struct QuickChordAddView: View {
         }
     }
 
-    private var outputEditor: some View {
+    private var saveTitle: String {
+        switch controller.saveButtonTitle(in: model) {
+        case "Add": return "Add to M4G"
+        default: return controller.saveButtonTitle(in: model)
+        }
+    }
+
+    // MARK: Word
+
+    private var wordSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Output")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                sectionLabel(controller.outputMode == .plain ? "Word" : "Key actions")
                 Spacer()
-                Picker("Output Mode", selection: $controller.outputMode) {
-                    ForEach(QuickChordOutputMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
+                Button(controller.outputMode == .plain ? "Use key actions instead" : "Use plain text instead") {
+                    controller.outputMode = controller.outputMode == .plain ? .actions : .plain
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 150)
-                .disabled(controller.editingChord.map { !AppModel.isQuickEditablePlainDeviceChord($0) } ?? false)
+                .buttonStyle(.link)
+                .font(.caption)
+                .disabled(isLocked)
+                .help("Key actions type shortcuts, arrows and other keys instead of text")
             }
-
             switch controller.outputMode {
             case .plain:
-                TextField("Expanded text", text: $controller.outputText)
+                TextField("The word or phrase the chord types", text: $controller.outputText)
                     .textFieldStyle(.roundedBorder)
+                    .font(.title3)
                     .focused($focusedField, equals: .output)
                     .onSubmit {
                         Task { await save() }
@@ -488,68 +477,170 @@ struct QuickChordAddView: View {
                     actionText: $controller.phraseActionText
                 )
             }
+            wordContext
         }
-    }
-
-    private var tokenPreview: some View {
-        HStack {
-            if controller.captureActive {
-                Label("Capturing", systemImage: "record.circle")
-                    .foregroundStyle(.blue)
-            }
-            if inputTokens.isEmpty {
-                Text("No input")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ActionTokenRow(tokens: inputTokens.map(ChordInputValidator.displayToken))
-            }
-        }
-        .frame(minHeight: 26, alignment: .leading)
     }
 
     @ViewBuilder
-    private var quickAdvisorContent: some View {
-        if controller.editingChord == nil, controller.outputMode == .plain {
-            VStack(alignment: .leading, spacing: 6) {
+    private var wordContext: some View {
+        let uses = model.shorthandWordUsage[word.lowercased()] ?? 0
+        if !existingChords.isEmpty {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text(existingChords.count == 1 ? "Already on your M4G:" : "Already on your M4G \(existingChords.count)×:")
+                ForEach(existingChords.prefix(2)) { chord in
+                    ActionTokenRow(tokens: chord.displayInput.map(ChordInputValidator.displayToken), tint: .green)
+                        .fixedSize()
+                }
+                if uses > 0 {
+                    Text("· written \(uses.formatted())× in 90 days")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption)
+        } else if uses > 0 {
+            Label("You wrote this \(uses.formatted())× in the last 90 days", systemImage: "chart.bar.fill")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: Suggestions
+
+    private var suggestionsSection: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                sectionLabel("Suggested keys")
                 if controller.isAdvisorLoading {
-                    HStack(spacing: 6) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Finding M4G suggestions")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    ProgressView().controlSize(.mini)
+                }
+                Spacer()
+                if controller.quickCandidates.count > 1 {
+                    Text("↑↓ to choose")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let error = controller.quickAdvisorError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else if controller.quickCandidates.isEmpty && !controller.isAdvisorLoading {
+                Text("No free keys found. Enter your own below.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(controller.quickCandidates.prefix(4).enumerated()), id: \.element.id) { index, candidate in
+                    Button {
+                        controller.applyQuickCandidate(candidate)
+                    } label: {
+                        QuickAdvisorCandidateRow(
+                            candidate: candidate,
+                            rank: index,
+                            isSelected: candidate.id == controller.selectedQuickCandidateID
+                        )
                     }
-                    .frame(minHeight: 24, alignment: .leading)
-                } else if let quickAdvisorError = controller.quickAdvisorError {
-                    Label(quickAdvisorError, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .frame(minHeight: 24, alignment: .leading)
-                } else if !controller.quickCandidates.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Suggestions")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        ForEach(controller.quickCandidates.prefix(5)) { candidate in
-                            Button {
-                                controller.applyQuickCandidate(candidate)
-                                scheduleFocus(.input)
-                            } label: {
-                                QuickAdvisorCandidateRow(
-                                    candidate: candidate,
-                                    isSelected: candidate.id == controller.selectedQuickCandidateID
-                                )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
+                    .buttonStyle(.plain)
                 }
             }
         }
     }
 
+    // MARK: Keys
+
+    private var keysSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionLabel("Keys")
+            HStack(spacing: 8) {
+                TextField("e.g. b+t+w", text: $controller.inputText)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .focused($focusedField, equals: .input)
+                Button {
+                    controller.captureActive.toggle()
+                    if controller.captureActive {
+                        focusedField = nil
+                    }
+                } label: {
+                    Label(controller.captureActive ? "Recording" : "Record", systemImage: controller.captureActive ? "record.circle.fill" : "record.circle")
+                        .foregroundStyle(controller.captureActive ? .red : .primary)
+                }
+                .help("Press keys to fill in the chord. Press Record again to stop.")
+            }
+            HStack(spacing: 8) {
+                if inputTokens.isEmpty {
+                    Text(controller.captureActive ? "Press the keys of the chord…" : "Pick a suggestion or type keys joined by +")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ActionTokenRow(tokens: inputTokens.map(ChordInputValidator.displayToken))
+                        .fixedSize()
+                    laptopNote
+                }
+            }
+            .frame(minHeight: 22, alignment: .leading)
+        }
+    }
+
+    /// Whether these keys can also be pressed together on a laptop.
+    @ViewBuilder
+    private var laptopNote: some View {
+        let letters = inputTokens.compactMap { $0.count == 1 ? $0.lowercased().first : nil }
+        if letters.count == inputTokens.count, letters.count >= 2 {
+            if LaptopErgonomics.isComfortable(letters) {
+                Label("Also easy on a laptop", systemImage: "laptopcomputer")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+                    .help("These keys sit on different fingers of a laptop keyboard, so you can press them together there too.")
+            } else {
+                Label("On a laptop: type \(String(letters)) then Space", systemImage: "laptopcomputer")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .help("Two of these keys share a finger on a laptop keyboard, so Chordsmith will give you other keys to press there.")
+            }
+        }
+    }
+
+    // MARK: Messages
+
+    @ViewBuilder
+    private var messages: some View {
+        if let replacementChord, controller.editingChord == nil {
+            let current = (replacementChord.plainOutput ?? replacementChord.output).trimmingCharacters(in: .whitespacesAndNewlines)
+            Group {
+                if isDuplicate {
+                    Label("These keys already type “\(current)”.", systemImage: "checkmark.circle")
+                        .foregroundStyle(.secondary)
+                } else if controller.outputMode == .actions || AppModel.isQuickEditablePlainDeviceChord(replacementChord) {
+                    Label("These keys type “\(current)” today. Saving changes them to “\(word)”.", systemImage: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.orange)
+                } else {
+                    Label("These keys run a macro. Switch to key actions to replace it.", systemImage: "lock.fill")
+                        .foregroundStyle(.orange)
+                }
+            }
+            .font(.caption)
+        }
+        if !validation.errors.isEmpty, !controller.inputText.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(validation.errors, id: \.self) { error in
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.red)
+        }
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+    }
+
     private func save() async {
+        guard !isDuplicate else { return }
         await controller.quickSave(model: model, onSuccess: onCommitSuccess)
     }
 
@@ -574,7 +665,22 @@ struct QuickChordAddView: View {
         case .input:
             scheduleFocus(.input)
         case .output:
-            scheduleFocus(.output)
+            scheduleFocus(word.isEmpty ? .output : .input)
+        }
+    }
+}
+
+/// One row in the quick panel's list.
+private enum QuickRow: Identifiable {
+    case chord(ChordEntry)
+    case worthAChord(GrowthItem)
+    case addNew(String)
+
+    var id: String {
+        switch self {
+        case .chord(let chord): return chord.id.uuidString
+        case .worthAChord(let item): return "grow:\(item.word)"
+        case .addNew(let word): return "add:\(word)"
         }
     }
 }
@@ -588,6 +694,13 @@ struct QuickChordPanelView: View {
     @State private var selectedIndex = 0
     @StateObject private var addController = QuickChordAddController()
     @State private var addFocusToken = 0
+    @State private var saved: (title: String, detail: String)?
+
+    init(model: AppModel, initialQuery: String = "", onDismiss: @escaping () -> Void) {
+        self.model = model
+        self.onDismiss = onDismiss
+        _searchText = State(initialValue: initialQuery)
+    }
     @FocusState private var focusedField: FocusField?
 
     private enum Mode {
@@ -606,9 +719,21 @@ struct QuickChordPanelView: View {
         }
     }
 
-    private var filteredChords: [ChordEntry] {
-        guard !searchText.isEmpty else { return [] }
-        return ChordSearch.ranked(quickChords, query: searchText, limit: 12)
+    private var query: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var rows: [QuickRow] {
+        guard !query.isEmpty else {
+            return model.growthPlan.items.prefix(6).map(QuickRow.worthAChord)
+        }
+        let chords = ChordSearch.ranked(quickChords, query: query, limit: 12)
+        var rows = chords.map(QuickRow.chord)
+        let exact = chords.contains { ($0.plainOutput ?? $0.output).trimmingCharacters(in: .whitespaces).lowercased() == query.lowercased() }
+        if !exact {
+            rows.append(.addNew(query))
+        }
+        return rows
     }
 
     var body: some View {
@@ -616,7 +741,9 @@ struct QuickChordPanelView: View {
             header
             Divider()
 
-            if mode == .search {
+            if let saved {
+                savedContent(saved)
+            } else if mode == .search {
                 searchContent
             } else {
                 addContent
@@ -625,10 +752,10 @@ struct QuickChordPanelView: View {
             Divider()
             footer
         }
-        .frame(width: 440)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .shadow(color: .black.opacity(0.25), radius: 18, x: 0, y: 10)
+        .frame(width: 460)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.1)))
         .background(LocalShortcutMonitor { event in
             handleShortcut(event)
         })
@@ -643,39 +770,94 @@ struct QuickChordPanelView: View {
         }
     }
 
+    // MARK: Header and footer
+
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: mode == .search ? "magnifyingglass" : "plus.circle.fill")
-                .foregroundStyle(.blue)
-                .font(.title3)
-            Text(mode == .search ? "Quick Chords" : addController.editingChord == nil ? "Quick Add" : "Quick Edit")
+            if mode == .add {
+                Button {
+                    backToSearch()
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+                .help("Back to search (Esc)")
+            } else {
+                Image(systemName: "keyboard")
+                    .foregroundStyle(.secondary)
+            }
+            Text(mode == .search ? "Chords" : addController.editingChord == nil ? "New chord" : "Edit chord")
                 .font(.headline)
             Spacer()
-            Button {
-                switchMode()
-            } label: {
-                Image(systemName: mode == .search ? "plus.circle" : "magnifyingglass")
+            if mode == .search {
+                Button {
+                    startAdd(prefilledOutput: query)
+                } label: {
+                    Label("New", systemImage: "plus")
+                }
+                .controlSize(.small)
+                .help("Add a chord (⌘N)")
             }
-            .buttonStyle(.borderless)
-            .help(mode == .search ? "Add chord" : "Search chords")
             Button {
                 onDismiss()
             } label: {
-                Image(systemName: "xmark")
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
             }
             .buttonStyle(.borderless)
             .help("Close")
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.vertical, 10)
     }
+
+    private var footer: some View {
+        HStack(spacing: 12) {
+            if saved != nil {
+                Spacer()
+            } else if mode == .search {
+                shortcut("↑↓", "select")
+                shortcut("↩", query.isEmpty ? "add" : "open")
+                shortcut("⌘N", "new")
+                shortcut("⌘C", "copy")
+                Spacer()
+                shortcut("esc", query.isEmpty ? "close" : "clear")
+            } else {
+                shortcut("↩", "save")
+                shortcut("⇥", "next field")
+                if !addController.quickCandidates.isEmpty {
+                    shortcut("↑↓", "suggestion")
+                }
+                Spacer()
+                shortcut("esc", "back")
+            }
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color.primary.opacity(0.03))
+    }
+
+    private func shortcut(_ key: String, _ label: String) -> some View {
+        HStack(spacing: 4) {
+            Text(key)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(.secondary.opacity(0.16), in: RoundedRectangle(cornerRadius: 4))
+            Text(label)
+        }
+    }
+
+    // MARK: Search
 
     private var searchContent: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
-                TextField("Search M4G chords", text: $searchText)
+                TextField("Find a chord by word or keys", text: $searchText)
                     .textFieldStyle(.plain)
                     .font(.title3)
                     .focused($focusedField, equals: .search)
@@ -689,119 +871,168 @@ struct QuickChordPanelView: View {
                     .foregroundStyle(.secondary)
                 }
             }
-            .padding(14)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
 
-            if searchText.isEmpty {
-                emptyState(icon: "keyboard", text: "Search, add, edit, or delete M4G chords")
-            } else if filteredChords.isEmpty {
-                VStack(spacing: 12) {
-                    emptyState(icon: "magnifyingglass", text: "No matching M4G chord")
-                    Button {
-                        startAdd(prefilledOutput: searchText)
-                    } label: {
-                        Label("Add Chord", systemImage: "plus.circle.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
+            if query.isEmpty {
+                HStack {
+                    Text(rows.isEmpty ? "" : "Worth a chord: you type these by hand most")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
                 }
-                .padding(.bottom, 18)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 2)
+            }
+
+            if rows.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: "keyboard")
+                        .font(.system(size: 26))
+                        .foregroundStyle(.secondary.opacity(0.5))
+                    Text("Type a word to find its chord, or press ⌘N to add one.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 30)
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(spacing: 3) {
-                            ForEach(Array(filteredChords.enumerated()), id: \.element.id) { index, chord in
-                                QuickChordResultRow(
-                                    chord: chord,
-                                    isSelected: index == selectedIndex,
-                                    onCopy: { copyOutput(chord) },
-                                    onEdit: { startEdit(chord) },
-                                    onToggleStar: { Task { await model.toggleChordStarred(chord) } }
-                                )
-                                .id(chord.id)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    selectedIndex = index
-                                    startEdit(chord)
-                                }
+                        LazyVStack(spacing: 2) {
+                            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                                rowView(row, isSelected: index == selectedIndex)
+                                    .id(row.id)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        selectedIndex = index
+                                        activate(row)
+                                    }
+                                    .onHover { hovering in
+                                        if hovering { selectedIndex = index }
+                                    }
                             }
                         }
-                        .padding(8)
+                        .padding(.horizontal, 8)
+                        .padding(.bottom, 8)
                     }
-                    .frame(maxHeight: 290)
+                    .frame(maxHeight: 300)
+                    .fixedSize(horizontal: false, vertical: true)
                     .onChange(of: selectedIndex) { _ in
-                        scrollSelectedChord(using: proxy)
-                    }
-                    .onChange(of: filteredChords.map(\.id)) { _ in
-                        selectedIndex = min(selectedIndex, max(filteredChords.count - 1, 0))
-                        scrollSelectedChord(using: proxy)
+                        scroll(using: proxy)
                     }
                 }
             }
         }
     }
+
+    @ViewBuilder
+    private func rowView(_ row: QuickRow, isSelected: Bool) -> some View {
+        switch row {
+        case .chord(let chord):
+            QuickChordResultRow(
+                chord: chord,
+                isSelected: isSelected,
+                onCopy: { copyOutput(chord) },
+                onEdit: { startEdit(chord) },
+                onToggleStar: { Task { await model.toggleChordStarred(chord) } }
+            )
+        case .worthAChord(let item):
+            HStack(spacing: 10) {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(StatsPalette.library)
+                Text(item.word)
+                    .font(.body.weight(.medium))
+                Text("\(item.frequency.formatted())× by hand")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if let keys = item.candidates.first?.inputKeys {
+                    ActionTokenRow(tokens: keys.map(ChordInputValidator.displayToken), tint: .secondary)
+                        .fixedSize()
+                }
+            }
+            .quickRowStyle(isSelected: isSelected)
+        case .addNew(let word):
+            HStack(spacing: 10) {
+                Image(systemName: "plus.circle.fill")
+                    .foregroundStyle(Color.accentColor)
+                Text("Add a chord for “\(word)”")
+                    .font(.body.weight(.medium))
+                Spacer()
+            }
+            .quickRowStyle(isSelected: isSelected)
+        }
+    }
+
+    // MARK: Add
 
     private var addContent: some View {
         QuickChordAddView(
             model: model,
             controller: addController,
-            showsCancel: true,
+            showsCancel: false,
             contentPadding: 14,
             focusToken: addFocusToken,
-            onCancel: {
-                addController.reset()
-                mode = .search
-                scheduleFocus(.search)
-            },
-            onCommitSuccess: {
-                onDismiss()
-            }
+            initialFocus: .output,
+            onCancel: backToSearch,
+            onCommitSuccess: showSaved
         )
     }
 
-    private var footer: some View {
-        HStack(spacing: 12) {
-            shortcut("Tab", mode == .search ? "add" : "search")
-            shortcut("Return", mode == .search ? "edit" : "save")
-            if mode == .search {
-                shortcut("Cmd+C", "copy")
-            }
-            Spacer()
-            shortcut("Esc", "close")
-        }
-        .font(.caption2)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .background(Color(nsColor: .controlBackgroundColor))
-    }
-
-    private func emptyState(icon: String, text: String) -> some View {
+    private func savedContent(_ saved: (title: String, detail: String)) -> some View {
         VStack(spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 28))
-                .foregroundStyle(.secondary.opacity(0.5))
-            Text(text)
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 34))
+                .foregroundStyle(.green)
+            Text(saved.title)
+                .font(.headline)
+            Text(saved.detail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 36)
+        .padding(.vertical, 28)
+        .padding(.horizontal, 20)
     }
 
-    private func shortcut(_ key: String, _ label: String) -> some View {
-        HStack(spacing: 4) {
-            Text(key)
-                .font(.system(size: 10, weight: .medium, design: .rounded))
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .background(.secondary.opacity(0.18), in: RoundedRectangle(cornerRadius: 3))
-            Text(label)
+    /// Confirms what was written and where, then closes.
+    private func showSaved() {
+        let word = addController.outputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keys = ChordInputValidator.tokens(from: addController.inputText, compactRepeatsUseDup: true)
+            .map(ChordInputValidator.displayToken)
+            .joined(separator: " + ")
+        let title = word.isEmpty ? "Saved" : "\(word)  ←  \(keys)"
+        let status = model.statusText.lowercased().contains("queued")
+            ? "Saved here. The M4G wasn't reachable, so it's queued and will sync when it's connected."
+            : "Written to your Master Forge."
+        withAnimation(.easeOut(duration: 0.15)) {
+            saved = (title, status)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            onDismiss()
         }
     }
 
+    // MARK: Keys
+
     private func handleShortcut(_ event: NSEvent) -> Bool {
+        let command = event.modifierFlags.contains(.command)
+        if saved != nil { return false }
+
         if event.keyCode == 53 {
-            onDismiss()
+            if mode == .add {
+                if addController.captureActive {
+                    addController.captureActive = false
+                } else {
+                    backToSearch()
+                }
+            } else if !searchText.isEmpty {
+                searchText = ""
+            } else {
+                onDismiss()
+            }
             return true
         }
 
@@ -810,29 +1041,37 @@ struct QuickChordPanelView: View {
             return true
         }
 
-        if event.keyCode == 48 {
-            switchMode()
+        if command, event.charactersIgnoringModifiers?.lowercased() == "n" {
+            startAdd(prefilledOutput: mode == .search ? query : "")
+            return true
+        }
+        if command, event.charactersIgnoringModifiers?.lowercased() == "f" {
+            backToSearch()
             return true
         }
 
         if mode == .search {
-            if event.modifierFlags.contains(.command),
-               event.charactersIgnoringModifiers?.lowercased() == "c" {
-                if let chord = selectedChord {
+            if command, event.charactersIgnoringModifiers?.lowercased() == "c" {
+                if case .chord(let chord) = selectedRow {
                     copyOutput(chord)
+                    return true
                 }
+                return false
+            }
+            if event.keyCode == 48, !command {
+                startAdd(prefilledOutput: query)
                 return true
             }
             if event.keyCode == 36 {
-                if let chord = selectedChord {
-                    startEdit(chord)
+                if let selectedRow {
+                    activate(selectedRow)
                 } else {
-                    startAdd(prefilledOutput: searchText)
+                    startAdd(prefilledOutput: query)
                 }
                 return true
             }
             if event.keyCode == 125 {
-                selectedIndex = min(selectedIndex + 1, max(filteredChords.count - 1, 0))
+                selectedIndex = min(selectedIndex + 1, max(rows.count - 1, 0))
                 return true
             }
             if event.keyCode == 126 {
@@ -842,19 +1081,15 @@ struct QuickChordPanelView: View {
         } else {
             if event.keyCode == 125, !addController.quickCandidates.isEmpty {
                 addController.cycleQuickCandidate(delta: 1)
-                addFocusToken += 1
                 return true
             }
             if event.keyCode == 126, !addController.quickCandidates.isEmpty {
                 addController.cycleQuickCandidate(delta: -1)
-                addFocusToken += 1
                 return true
             }
             if event.keyCode == 36 {
                 Task {
-                    await addController.quickSave(model: model) {
-                        onDismiss()
-                    }
+                    await addController.quickSave(model: model, onSuccess: showSaved)
                 }
                 return true
             }
@@ -863,28 +1098,33 @@ struct QuickChordPanelView: View {
         return false
     }
 
-    private var selectedChord: ChordEntry? {
-        guard !filteredChords.isEmpty else { return nil }
-        return filteredChords[min(selectedIndex, filteredChords.count - 1)]
+    private var selectedRow: QuickRow? {
+        let rows = rows
+        guard !rows.isEmpty else { return nil }
+        return rows[min(selectedIndex, rows.count - 1)]
     }
 
-    private func scrollSelectedChord(using proxy: ScrollViewProxy) {
-        guard let selectedChord else { return }
+    private func activate(_ row: QuickRow) {
+        switch row {
+        case .chord(let chord): startEdit(chord)
+        case .worthAChord(let item): startAdd(prefilledOutput: item.word)
+        case .addNew(let word): startAdd(prefilledOutput: word)
+        }
+    }
+
+    private func scroll(using proxy: ScrollViewProxy) {
+        guard let selectedRow else { return }
         DispatchQueue.main.async {
             withAnimation(.easeOut(duration: 0.12)) {
-                proxy.scrollTo(selectedChord.id, anchor: .center)
+                proxy.scrollTo(selectedRow.id, anchor: .center)
             }
         }
     }
 
-    private func switchMode() {
-        if mode == .search {
-            startAdd(prefilledOutput: searchText)
-        } else {
-            addController.reset()
-            mode = .search
-            scheduleFocus(.search)
-        }
+    private func backToSearch() {
+        addController.reset()
+        mode = .search
+        scheduleFocus(.search)
     }
 
     private func startAdd(prefilledInput: String = "", prefilledOutput: String = "") {
@@ -912,6 +1152,18 @@ struct QuickChordPanelView: View {
     private func copyOutput(_ chord: ChordEntry) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(chord.plainOutput ?? chord.output, forType: .string)
+        model.statusText = "Copied “\(chord.plainOutput ?? chord.output)”"
+    }
+}
+
+private extension View {
+    func quickRowStyle(isSelected: Bool) -> some View {
+        padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(isSelected ? Color.accentColor.opacity(0.16) : Color.clear)
+            )
     }
 }
 
@@ -928,87 +1180,83 @@ private struct QuickChordResultRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack {
-                    Text(chord.plainOutput ?? chord.output)
-                        .font(.headline)
-                        .lineLimit(1)
-                    if !AppModel.isQuickEditablePlainDeviceChord(chord) {
-                        Image(systemName: "lock.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                    }
-                }
-                ActionTokenRow(tokens: inputTokens)
-                if !chord.actionFlags.isEmpty {
-                    ActionTokenRow(tokens: chord.actionFlags.map(\.rawValue).sorted(), tint: .orange)
-                }
-                Text("\(chord.deploymentTarget.displayName) • \(chord.source)")
+        HStack(spacing: 10) {
+            Text(chord.plainOutput ?? chord.output)
+                .font(.body.weight(.medium))
+                .lineLimit(1)
+            if !AppModel.isQuickEditablePlainDeviceChord(chord) {
+                Image(systemName: "command")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.orange)
+                    .help("Macro or key actions")
             }
-            Spacer()
-            Button {
-                onToggleStar()
-            } label: {
-                Image(systemName: chord.isStarred ? "star.fill" : "star")
-                    .foregroundStyle(chord.isStarred ? .yellow : .secondary)
+            if chord.isStarred {
+                Image(systemName: "star.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.yellow)
             }
-            .buttonStyle(.borderless)
-            .help(chord.isStarred ? "Unstar chord" : "Star chord")
-            Button {
-                onCopy()
-            } label: {
-                Image(systemName: "doc.on.doc")
+            Spacer(minLength: 8)
+            ActionTokenRow(tokens: inputTokens)
+                .fixedSize()
+            if isSelected {
+                HStack(spacing: 2) {
+                    iconButton(chord.isStarred ? "star.slash" : "star", help: chord.isStarred ? "Unstar" : "Star", action: onToggleStar)
+                    iconButton("doc.on.doc", help: "Copy the output (⌘C)", action: onCopy)
+                    iconButton("pencil", help: "Edit (↩)", action: onEdit)
+                }
             }
-            .buttonStyle(.borderless)
-            .help("Copy output")
-            Button {
-                onEdit()
-            } label: {
-                Image(systemName: "pencil")
-            }
-            .buttonStyle(.borderless)
-            .help("Edit")
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 7)
-                .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.clear)
-        )
+        .quickRowStyle(isSelected: isSelected)
+    }
+
+    private func iconButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .frame(width: 20, height: 18)
+        }
+        .buttonStyle(.borderless)
+        .help(help)
     }
 }
 
 private struct QuickAdvisorCandidateRow: View {
     let candidate: Candidate
+    let rank: Int
     let isSelected: Bool
 
-    private var reason: String {
-        candidate.softReasons.first ?? "Valid M4G chord"
+    private var letters: [Character] {
+        candidate.inputKeys.compactMap { $0.count == 1 ? $0.lowercased().first : nil }
     }
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
+            Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                .font(.caption)
             ActionTokenRow(tokens: candidate.inputKeys.map(ChordInputValidator.displayToken))
-                .frame(maxWidth: 160, alignment: .leading)
-            Text(reason)
+                .fixedSize()
+            if rank == 0 {
+                PanelBadge(text: "Best", tint: .green)
+            }
+            Text(candidate.softReasons.first ?? "Free and easy to press")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 6)
-            Text(candidate.score, format: .number.precision(.fractionLength(1)))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+            if letters.count == candidate.inputKeys.count, LaptopErgonomics.isComfortable(letters) {
+                Image(systemName: "laptopcomputer")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+                    .help("Also easy to press together on a laptop")
+            }
         }
-        .padding(.horizontal, 7)
+        .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .contentShape(Rectangle())
         .background(
             RoundedRectangle(cornerRadius: 6)
-                .fill(isSelected ? Color.accentColor.opacity(0.16) : Color.secondary.opacity(0.08))
+                .fill(isSelected ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.06))
         )
     }
 }
