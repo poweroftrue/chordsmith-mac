@@ -83,9 +83,10 @@ struct CoachEngine {
                 kind: .shorthand(letters: shorthand.letters),
                 word: event.word,
                 input: shorthand.letters.map { String($0) } + ["space"],
-                detail: handCountToday > 1
+                detail: (handCountToday > 1
                     ? "Typed in full \(handCountToday)× today. Type \(shorthand.letters) then Space"
-                    : "Type \(shorthand.letters) then Space, any letter order"
+                    : "Type \(shorthand.letters) then Space, any letter order")
+                    + (shorthand.chordSignature != nil ? ", or press the chord's keys together" : "")
             )
             guard isAllowed(word: nudge.word, settings: settings, now: now) else { return nil }
             record(nudge, now: now)

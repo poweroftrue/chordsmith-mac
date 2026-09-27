@@ -38,7 +38,7 @@ enum ShorthandStatus: Equatable {
         case .pausedInApp:
             return "You paused shorthands in this app. Everywhere else they work as usual."
         case .active:
-            return "Type a chord's letters in any order, then Space. Backspace straight after puts your letters back."
+            return "Press a chord's keys together, or type its letters in any order then Space. Backspace straight after puts your letters back."
         case .failed:
             return "The keyboard hook couldn't start. Quit and reopen Chordsmith, or check Accessibility access."
         }
@@ -179,7 +179,9 @@ extension AppModel {
         inputObserver.noteShorthand(event)
         let service = libraryService
         switch event.kind {
-        case .expand:
+        case .edit:
+            break
+        case .expand, .chord:
             shorthandToday.expansions += 1
             shorthandToday.savedKeystrokes += event.savedKeystrokes
             shorthandPeriod.expansions += 1
@@ -308,6 +310,7 @@ extension AppModel {
             try await libraryService.setSetting(keys.onlyWhenForgeUnplugged, value: settings.onlyWhenForgeUnplugged ? "1" : "0")
             try await libraryService.setSetting(keys.expandOnPunctuation, value: settings.expandOnPunctuation ? "1" : "0")
             try await libraryService.setSetting(keys.undoWithBackspace, value: settings.undoWithBackspace ? "1" : "0")
+            try await libraryService.setSetting(keys.mashChords, value: settings.mashChords ? "1" : "0")
             try await libraryService.setSetting(keys.excludedBundleIDs, value: settings.excludedBundleIDs.sorted().joined(separator: ","))
         } catch {
             lastError = error.localizedDescription
@@ -326,6 +329,7 @@ extension AppModel {
         settings.onlyWhenForgeUnplugged = await flag(keys.onlyWhenForgeUnplugged, default: true)
         settings.expandOnPunctuation = await flag(keys.expandOnPunctuation, default: true)
         settings.undoWithBackspace = await flag(keys.undoWithBackspace, default: true)
+        settings.mashChords = await flag(keys.mashChords, default: true)
         // Carry over apps excluded from the old software chording engine.
         let stored = try? await libraryService.stringSetting(forKey: keys.excludedBundleIDs)
         let legacy = try? await libraryService.stringSetting(forKey: "engine.excluded_bundle_ids")

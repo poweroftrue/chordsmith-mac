@@ -23,6 +23,8 @@ public struct ShorthandSettings: Equatable, Sendable {
     public var onlyWhenForgeUnplugged = true
     public var expandOnPunctuation = true
     public var undoWithBackspace = true
+    /// Pressing a chord's keys together, like on the M4G.
+    public var mashChords = true
     public var excludedBundleIDs: Set<String> = []
 
     public init(
@@ -30,12 +32,14 @@ public struct ShorthandSettings: Equatable, Sendable {
         onlyWhenForgeUnplugged: Bool = true,
         expandOnPunctuation: Bool = true,
         undoWithBackspace: Bool = true,
+        mashChords: Bool = true,
         excludedBundleIDs: Set<String> = []
     ) {
         self.enabled = enabled
         self.onlyWhenForgeUnplugged = onlyWhenForgeUnplugged
         self.expandOnPunctuation = expandOnPunctuation
         self.undoWithBackspace = undoWithBackspace
+        self.mashChords = mashChords
         self.excludedBundleIDs = excludedBundleIDs
     }
 
@@ -44,6 +48,7 @@ public struct ShorthandSettings: Equatable, Sendable {
         onlyWhenForgeUnplugged: "shorthand.only_when_forge_unplugged",
         expandOnPunctuation: "shorthand.expand_on_punctuation",
         undoWithBackspace: "shorthand.undo_with_backspace",
+        mashChords: "shorthand.mash_chords",
         excludedBundleIDs: "shorthand.excluded_bundle_ids"
     )
 }
@@ -301,7 +306,7 @@ public final class ShorthandEngine: @unchecked Sendable {
         switch type {
         case .keyUp:
             let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-            return suppressedKeyUps.remove(keyCode) != nil ? nil : pass
+            if suppressedKeyUps.remove(keyCode) != nil { return nil }
         case .keyDown:
             break
         default:
@@ -320,18 +325,53 @@ public final class ShorthandEngine: @unchecked Sendable {
             return pass
         }
 
-        let key = Self.classify(event)
+        let key = type == .keyUp
+            ? ShorthandTyper.Key.keyUp(keyCode: UInt16(event.getIntegerValueField(.keyboardEventKeycode)), at: Self.seconds(event))
+            : Self.classify(event)
         let options = ShorthandTyper.Options(
             expandOnPunctuation: state.settings.expandOnPunctuation,
-            undoWithBackspace: state.settings.undoWithBackspace
+            undoWithBackspace: state.settings.undoWithBackspace,
+            mashChords: state.settings.mashChords
         )
         let matcher = state.matcher
-        guard case .replace(let replacement) = typer.handle(key, options: options, match: { matcher.match($0) }) else {
+        let attempts = typer.chordAttempts
+        let action = typer.handle(
+            key,
+            options: options,
+            match: { matcher.match($0) },
+            chordMatch: { matcher.matchChord($0) },
+            isRealWord: { matcher.isRealWord($0) }
+        )
+        if typer.chordAttempts != attempts, let attempt = typer.lastChordAttempt {
+            logger.notice("Chord attempt: \(attempt.keys, privacy: .public) keys, spread \(attempt.spreadMs, privacy: .public) ms, together \(attempt.togetherMs, privacy: .public) ms, \(attempt.reason, privacy: .public)")
+        }
+        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        let replacement: ShorthandTyper.Replacement
+        switch action {
+        case .pass:
             return pass
+        case .swallow:
+            if type == .keyDown, event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                suppressedKeyUps.insert(keyCode)
+            }
+            return nil
+        case .replace(let found):
+            replacement = found
         }
 
         perform(replacement, proxy: proxy, keyMap: state.keyMap)
-        suppressedKeyUps.insert(CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode)))
+        guard type == .keyDown else {
+            // A chord fires on release; the key-up itself goes through.
+            notify(replacement)
+            return pass
+        }
+        suppressedKeyUps.insert(keyCode)
+        notify(replacement)
+        return nil
+    }
+
+    private func notify(_ replacement: ShorthandTyper.Replacement) {
+        guard replacement.kind != .edit else { return }
         onEvent?(ShorthandEvent(
             kind: replacement.kind,
             typed: replacement.typed,
@@ -341,7 +381,10 @@ public final class ShorthandEngine: @unchecked Sendable {
             savedKeystrokes: replacement.savedKeystrokes,
             at: Date()
         ))
-        return nil
+    }
+
+    static func seconds(_ event: CGEvent) -> TimeInterval {
+        Double(EventClock.uptimeNanoseconds(forEventTimestamp: event.timestamp)) / 1_000_000_000
     }
 
     static func classify(_ event: CGEvent) -> ShorthandTyper.Key {
@@ -371,8 +414,7 @@ public final class ShorthandEngine: @unchecked Sendable {
         if text.unicodeScalars.allSatisfy({ (0xF700...0xF8FF).contains($0.value) || $0.value < 0x20 }) {
             return .boundary
         }
-        let seconds = Double(EventClock.uptimeNanoseconds(forEventTimestamp: event.timestamp)) / 1_000_000_000
-        return .text(text, isRepeat: isRepeat, at: seconds)
+        return .text(text, isRepeat: isRepeat, at: seconds(event), keyCode: UInt16(keyCode))
     }
 
     /// Deletes the typed letters and types the replacement right behind the

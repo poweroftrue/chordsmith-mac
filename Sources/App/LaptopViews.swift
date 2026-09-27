@@ -297,7 +297,7 @@ struct ShorthandRow: View {
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 3) {
-                LetterKeys(letters: shorthand.letters)
+                LetterKeys(letters: shorthand.letters, together: shorthand.kind == .pressTogether)
                 Text(detail)
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -319,11 +319,14 @@ struct ShorthandRow: View {
         }
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(shorthand.output): type \(shorthand.letters.map(String.init).joined(separator: " ")), then space")
+        .accessibilityLabel(shorthand.kind == .pressTogether
+            ? "\(shorthand.output): press \(shorthand.letters.map(String.init).joined(separator: " ")) together"
+            : "\(shorthand.output): type \(shorthand.letters.map(String.init).joined(separator: " ")), then space")
     }
 
     private var detail: String {
         var parts = ["saves \(shorthand.savedKeystrokes)"]
+        if shorthand.chordSignature != nil, shorthand.kind != .pressTogether { parts.append("or press together") }
         if uses > 0 { parts.append("\(uses.formatted())× in 90 days") }
         return parts.joined(separator: " · ")
     }
@@ -334,23 +337,31 @@ struct ShorthandRow: View {
         case .newShortcut: return .orange
         case .doubledLetter: return .teal
         case .sameKeys: return .blue
+        case .pressTogether: return .indigo
         }
     }
 }
 
-/// The letters to type, as key caps, with the Space that triggers them.
+/// The letters to type, as key caps, with the Space that triggers them,
+/// or joined with + when they are pressed together.
 struct LetterKeys: View {
     let letters: String
+    var together = false
 
     var body: some View {
         HStack(spacing: 3) {
-            ForEach(Array(letters.enumerated()), id: \.offset) { _, letter in
+            ForEach(Array(letters.enumerated()), id: \.offset) { index, letter in
+                if together && index > 0 {
+                    Text("+").font(.caption2).foregroundStyle(.secondary)
+                }
                 KeyCap(text: String(letter))
             }
-            KeyCap(text: "space", wide: true)
+            if !together {
+                KeyCap(text: "space", wide: true)
+            }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(letters), then space")
+        .accessibilityLabel(together ? "\(letters), pressed together" : "\(letters), then space")
     }
 }
 

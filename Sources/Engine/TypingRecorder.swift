@@ -191,7 +191,9 @@ public actor UsageRecorder {
         let current = String(buffer.map(\.character))
         let pending = pendingWord.map { String($0.characters.map(\.character)) }
         switch kind {
-        case .expand:
+        case .edit:
+            break
+        case .expand, .chord:
             if current == typed {
                 buffer = Self.retype(output, over: buffer, source: .shorthand)
             } else if pending == typed, let word = pendingWord {
@@ -201,6 +203,10 @@ public actor UsageRecorder {
                     trailingDelimiters: word.trailingDelimiters,
                     delimiters: word.delimiters
                 )
+            }
+            if kind == .chord {
+                // The chord's own space, which no key typed.
+                await observeKeyboardText(trigger, source: .shorthand, startedAt: .now, endedAt: .now, countsKeystrokes: false)
             }
         case .undo:
             if current == output {

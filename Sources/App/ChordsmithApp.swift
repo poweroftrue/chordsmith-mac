@@ -1389,6 +1389,7 @@ struct SettingsView: View {
             Section("Laptop shorthand") {
                 Toggle("Type chords on the laptop keyboard", isOn: $model.shorthandSettings.enabled)
                 Group {
+                    Toggle("Press a chord's keys together to type it", isOn: $model.shorthandSettings.mashChords)
                     Toggle("Only while the Master Forge is unplugged", isOn: $model.shorthandSettings.onlyWhenForgeUnplugged)
                     Toggle("Also replace before , . ; : ! ?", isOn: $model.shorthandSettings.expandOnPunctuation)
                     Toggle("Backspace right after puts my letters back", isOn: $model.shorthandSettings.undoWithBackspace)

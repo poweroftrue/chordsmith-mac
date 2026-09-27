@@ -190,9 +190,9 @@ final class ShorthandEventTests: XCTestCase {
     }
 
     func testClassifiesTypingEditingAndShortcuts() {
-        guard case .text("a", false, _) = ShorthandEngine.classify(keyEvent(0, text: "a")) else { return XCTFail("letter") }
-        guard case .text("A", false, _) = ShorthandEngine.classify(keyEvent(0, text: "A", flags: .maskShift)) else { return XCTFail("shifted letter") }
-        guard case .text(" ", true, _) = ShorthandEngine.classify(keyEvent(49, text: " ", isRepeat: true)) else { return XCTFail("held space") }
+        guard case .text("a", false, _, 0) = ShorthandEngine.classify(keyEvent(0, text: "a")) else { return XCTFail("letter") }
+        guard case .text("A", false, _, 0) = ShorthandEngine.classify(keyEvent(0, text: "A", flags: .maskShift)) else { return XCTFail("shifted letter") }
+        guard case .text(" ", true, _, 49) = ShorthandEngine.classify(keyEvent(49, text: " ", isRepeat: true)) else { return XCTFail("held space") }
         XCTAssertEqual(ShorthandEngine.classify(keyEvent(8, text: "c", flags: .maskCommand)), .boundary, "⌘C is a shortcut")
         XCTAssertEqual(ShorthandEngine.classify(keyEvent(49, text: " ", flags: .maskControl)), .boundary, "⌃Space switches input source")
         XCTAssertEqual(ShorthandEngine.classify(keyEvent(51)), .backspace(isRepeat: false))
@@ -210,5 +210,118 @@ final class ShorthandEventTests: XCTestCase {
         XCTAssertEqual(map["A"]?.shift, true)
         XCTAssertEqual(map["a"]?.shift, false)
         XCTAssertEqual(map["a"]?.keyCode, map["A"]?.keyCode)
+    }
+}
+
+
+final class MashedChordTests: XCTestCase {
+    private let matcher: ShorthandMatcher = {
+        let chords = [
+            ChordEntry(inputKeys: ["a", "b", "t"], output: "about", profile: .cc2A1, deploymentTarget: .device, source: "test"),
+            ChordEntry(inputKeys: ["o", "n"], output: "only", profile: .cc2A1, deploymentTarget: .device, source: "test")
+        ]
+        let words: Set<String> = ["bat", "tab", "on", "no"]
+        return ShorthandMatcher(catalog: ShorthandBuilder.build(chords: chords, realWords: words), realWords: words)
+    }()
+    private let codes: [Character: UInt16] = ["a": 0, "b": 11, "t": 17, "o": 31, "n": 45, "x": 7, " ": 49]
+
+    private func send(_ key: ShorthandTyper.Key, _ typer: inout ShorthandTyper, mash: Bool = true) -> ShorthandTyper.Action {
+        let matcher = self.matcher
+        return typer.handle(
+            key,
+            options: .init(mashChords: mash),
+            match: { matcher.match($0) },
+            chordMatch: { matcher.matchChord($0) },
+            isRealWord: { matcher.isRealWord($0) }
+        )
+    }
+
+    /// Presses `keys` at the given times (seconds), then releases them at
+    /// the release times, returning the action of the last event.
+    @discardableResult
+    private func mash(_ keys: String, down: [Double], up: [Double], _ typer: inout ShorthandTyper, mash: Bool = true) -> ShorthandTyper.Action {
+        var events: [(Double, ShorthandTyper.Key)] = []
+        for (index, character) in keys.enumerated() {
+            let code = codes[character]!
+            events.append((down[index], .text(String(character), isRepeat: false, at: down[index], keyCode: code)))
+            events.append((up[index], .keyUp(keyCode: code, at: up[index])))
+        }
+        var last = ShorthandTyper.Action.pass
+        for (_, key) in events.sorted(by: { $0.0 < $1.0 }) {
+            last = send(key, &typer, mash: mash)
+        }
+        return last
+    }
+
+    func testKeysPressedTogetherBecomeTheWordWithASpace() {
+        var typer = ShorthandTyper()
+        guard case .replace(let chord) = mash("abt", down: [0, 0.012, 0.025], up: [0.11, 0.12, 0.125], &typer) else {
+            return XCTFail("expected a chord")
+        }
+        XCTAssertEqual(chord.kind, .chord)
+        XCTAssertEqual(chord.deleteCount, 3)
+        XCTAssertEqual(chord.insert, "about ")
+        XCTAssertEqual(typer.lastChordAttempt?.matched, true)
+    }
+
+    func testRolledTypingIsNeverAChord() {
+        var typer = ShorthandTyper()
+        // Each key let go before the next goes down.
+        XCTAssertEqual(mash("abt", down: [0, 0.09, 0.18], up: [0.07, 0.16, 0.25], &typer), .pass)
+        // Fast rolling with overlap: a new key goes down after one was let go.
+        var fast = ShorthandTyper()
+        XCTAssertEqual(mash("abt", down: [0, 0.05, 0.1], up: [0.08, 0.13, 0.17], &fast), .pass)
+        // Everything down at once but pressed slowly, as in a lazy roll.
+        var slow = ShorthandTyper()
+        XCTAssertEqual(mash("abt", down: [0, 0.07, 0.14], up: [0.2, 0.21, 0.22], &slow), .pass)
+    }
+
+    func testRealWordsNeedADeliberatePress() {
+        var loose = ShorthandTyper()
+        XCTAssertEqual(mash("on", down: [0, 0.035], up: [0.09, 0.1], &loose), .pass, "`on` rolled quickly stays `on`")
+        var tight = ShorthandTyper()
+        guard case .replace(let chord) = mash("on", down: [0, 0.01], up: [0.1, 0.11], &tight) else {
+            return XCTFail("a firm press is a chord")
+        }
+        XCTAssertEqual(chord.insert, "only ")
+    }
+
+    func testSpaceAfterAChordIsDroppedAndPunctuationTucksIn() {
+        var typer = ShorthandTyper()
+        mash("abt", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &typer)
+        XCTAssertEqual(send(.text(" ", isRepeat: false, at: 0.3, keyCode: 49), &typer), .swallow)
+
+        var other = ShorthandTyper()
+        mash("abt", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &other)
+        guard case .replace(let edit) = send(.text(",", isRepeat: false, at: 0.3, keyCode: 43), &other) else {
+            return XCTFail("expected the comma to replace the space")
+        }
+        XCTAssertEqual(edit.deleteCount, 1)
+        XCTAssertEqual(edit.insert, ", ")
+    }
+
+    func testBackspaceUndoesAChord() {
+        var typer = ShorthandTyper()
+        mash("abt", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &typer)
+        guard case .replace(let undo) = send(.backspace(isRepeat: false), &typer) else { return XCTFail("expected undo") }
+        XCTAssertEqual(undo.deleteCount, 6)
+        XCTAssertEqual(undo.insert, "abt")
+    }
+
+    func testHoldingAChordDoesNotRepeatLetters() {
+        var typer = ShorthandTyper()
+        _ = send(.text("a", isRepeat: false, at: 0, keyCode: 0), &typer)
+        _ = send(.text("b", isRepeat: false, at: 0.01, keyCode: 11), &typer)
+        XCTAssertEqual(send(.text("b", isRepeat: true, at: 0.5, keyCode: 11), &typer), .swallow)
+    }
+
+    func testOnlyAtTheStartOfAWordAndOnlyWhenEnabled() {
+        var typer = ShorthandTyper()
+        _ = send(.text("x", isRepeat: false, at: 0, keyCode: 7), &typer)
+        _ = send(.keyUp(keyCode: 7, at: 0.05), &typer)
+        XCTAssertEqual(mash("abt", down: [0.2, 0.21, 0.22], up: [0.3, 0.3, 0.31], &typer), .pass)
+
+        var off = ShorthandTyper()
+        XCTAssertEqual(mash("abt", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &off, mash: false), .pass)
     }
 }
