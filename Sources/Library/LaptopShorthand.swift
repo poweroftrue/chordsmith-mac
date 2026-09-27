@@ -48,6 +48,9 @@ public enum ShorthandSkipReason: String, Codable, Sendable {
     case conflict
     /// You turned it off.
     case disabled
+    /// Its keys can't be pressed together on a laptop and nothing
+    /// comfortable was free.
+    case awkwardOnLaptop
 
     public var displayName: String {
         switch self {
@@ -56,6 +59,7 @@ public enum ShorthandSkipReason: String, Codable, Sendable {
         case .notText: return "Macro or shortcut, not text"
         case .conflict: return "Another shorthand uses these letters"
         case .disabled: return "Turned off"
+        case .awkwardOnLaptop: return "Keys share a finger on a laptop"
         }
     }
 }
@@ -75,9 +79,13 @@ public struct LaptopShorthand: Identifiable, Hashable, Sendable {
     public let kind: ShorthandKind
     /// Sorted letter multisets that trigger this shorthand.
     public let signatures: [String]
-    /// The chord's own keys when they are all letters, for pressing them
-    /// together. Set even when typing them in a row would spell a word.
-    public let chordSignature: String?
+    /// The keys to press together on the laptop, in word order: the
+    /// chord's own keys, or comfortable ones when those share a finger.
+    public let pressKeys: String?
+    /// Whether `pressKeys` differ from the chord's keys.
+    public let pressAdjusted: Bool
+    /// Signature of `pressKeys`, for matching a press.
+    public var chordSignature: String? { pressKeys.map { ShorthandLetters.signature($0) } }
 
     public init(
         chordID: UUID,
@@ -86,7 +94,9 @@ public struct LaptopShorthand: Identifiable, Hashable, Sendable {
         letters: String,
         kind: ShorthandKind,
         signatures: [String],
-        chordSignature: String? = nil
+        chordSignature: String? = nil,
+        pressKeys: String? = nil,
+        pressAdjusted: Bool = false
     ) {
         self.chordID = chordID
         self.output = output
@@ -95,7 +105,17 @@ public struct LaptopShorthand: Identifiable, Hashable, Sendable {
         self.letters = letters
         self.kind = kind
         self.signatures = signatures
-        self.chordSignature = chordSignature
+        self.pressKeys = pressKeys ?? chordSignature.map {
+            ShorthandBuilder.wordOrder(Array($0), word: output.lowercased()).map(String.init).joined()
+        }
+        self.pressAdjusted = pressAdjusted
+    }
+
+    func withPressKeys(_ keys: String?, adjusted: Bool) -> LaptopShorthand {
+        LaptopShorthand(
+            chordID: chordID, output: output, chordKeys: chordKeys, letters: letters, kind: kind,
+            signatures: signatures, pressKeys: keys, pressAdjusted: adjusted
+        )
     }
 
     /// Keystrokes saved per use, counting the trigger key on both sides.
@@ -344,7 +364,8 @@ public enum ShorthandBuilder {
     public static func build(
         chords: [ChordEntry],
         realWords: Set<String>,
-        overrides: [UUID: ShorthandOverride] = [:]
+        overrides: [UUID: ShorthandOverride] = [:],
+        usage: [String: Int] = [:]
     ) -> ShorthandCatalog {
         struct Pending {
             let chord: ChordEntry
@@ -485,7 +506,109 @@ public enum ShorthandBuilder {
             ))
         }
 
-        return ShorthandCatalog(shorthands: shorthands, skipped: skipped)
+        let (pressable, awkward) = assignPressKeys(shorthands, realWords: realWords, usage: usage)
+        skipped += awkward.map {
+            SkippedShorthand(chordID: $0.chordID, output: $0.output, chordKeys: $0.chordKeys, reason: .awkwardOnLaptop)
+        }
+        return ShorthandCatalog(shorthands: pressable, skipped: skipped)
+    }
+
+    /// Gives every word keys that are comfortable to press together on a
+    /// laptop. A chord keeps its own keys when they are; otherwise the
+    /// easiest subset of them (model: d+l+m+o → d+l+m, since l and o share
+    /// a finger), and only then keys picked from the word's letters.
+    /// Press-only shorthands with no comfortable keys are returned apart.
+    static func assignPressKeys(
+        _ shorthands: [LaptopShorthand],
+        realWords: Set<String>,
+        usage: [String: Int] = [:]
+    ) -> ([LaptopShorthand], [LaptopShorthand]) {
+        var result = shorthands
+        var used: Set<String> = []
+        var pressedWords: Set<String> = []
+        var pending: [Int] = []
+        // Words' signatures, so new keys avoid spelling one (a real word
+        // needs a firmer press).
+        let wordSignatures = Set(realWords.filter { (2...4).contains($0.count) }.map { ShorthandLetters.signature($0) })
+
+        for (index, shorthand) in shorthands.enumerated() {
+            if let keys = shorthand.pressKeys, LaptopErgonomics.isComfortable(Array(keys)),
+               let signature = shorthand.chordSignature, !used.contains(signature) {
+                used.insert(signature)
+                pressedWords.insert(shorthand.word)
+            } else {
+                pending.append(index)
+            }
+        }
+
+        var awkward: [LaptopShorthand] = []
+        var dropped: Set<Int> = []
+        // Words you write most pick first, so they get the easiest keys.
+        pending.sort { (usage[shorthands[$0].word] ?? 0, -$0) > (usage[shorthands[$1].word] ?? 0, -$1) }
+        for index in pending {
+            let shorthand = shorthands[index]
+            guard !pressedWords.contains(shorthand.word),
+                  let keys = comfortableKeys(for: shorthand, used: used, wordSignatures: wordSignatures) else {
+                result[index] = shorthand.withPressKeys(nil, adjusted: false)
+                if shorthand.kind == .pressTogether {
+                    awkward.append(shorthand)
+                    dropped.insert(index)
+                }
+                continue
+            }
+            used.insert(ShorthandLetters.signature(keys))
+            pressedWords.insert(shorthand.word)
+            result[index] = shorthand.withPressKeys(keys, adjusted: true)
+        }
+        let kept = result.enumerated().filter { !dropped.contains($0.offset) }.map(\.element)
+        return (kept, awkward)
+    }
+
+    static func comfortableKeys(for shorthand: LaptopShorthand, used: Set<String>, wordSignatures: Set<String>) -> String? {
+        let word = shorthand.word
+        let wordLetters = Array(word.filter { $0.isASCII && $0.isLetter })
+        guard wordLetters.count >= 3, let first = wordLetters.first else { return nil }
+        let original = Set(shorthand.chordKeys.map { $0.lowercased() }.filter { $0.count == 1 }.compactMap(\.first)
+            .filter { LaptopErgonomics.keys[$0] != nil })
+        var pool = original
+        pool.formUnion(wordLetters)
+        let letters = Array(pool).sorted()
+        let wordSignature = ShorthandLetters.signature(word)
+
+        var best: (score: Double, keys: [Character])?
+        func consider(_ keys: [Character]) {
+            let signature = ShorthandLetters.signature(keys)
+            guard !used.contains(signature), signature != wordSignature,
+                  keys.count < wordLetters.count,
+                  let cost = LaptopErgonomics.cost(keys), cost <= LaptopErgonomics.limit(keys: keys.count) else { return }
+            var score = cost
+            // Keys you already press on the Forge are easiest to remember.
+            score += Double(keys.filter { !original.contains($0) }.count) * 0.6
+            if !keys.contains(first) { score += 0.5 }
+            if keys.contains(where: { !word.contains($0) }) { score += 0.8 }
+            if wordSignatures.contains(signature) { score += 0.7 }
+            score += Double(keys.count - 2) * 0.3
+            if best == nil || score < best!.score { best = (score, keys) }
+        }
+        for size in 2...min(4, letters.count) {
+            forEachCombination(of: letters, size: size, consider)
+        }
+        guard let keys = best?.keys else { return nil }
+        return wordOrder(keys, word: word).map(String.init).joined()
+    }
+
+    static func forEachCombination(of items: [Character], size: Int, _ body: ([Character]) -> Void) {
+        var chosen: [Character] = []
+        func recurse(_ start: Int) {
+            if chosen.count == size { body(chosen); return }
+            guard start < items.count, items.count - start >= size - chosen.count else { return }
+            for index in start..<items.count {
+                chosen.append(items[index])
+                recurse(index + 1)
+                chosen.removeLast()
+            }
+        }
+        recurse(0)
     }
 
     static func pressTogether(_ chord: ChordEntry, output: String, signature: String) -> LaptopShorthand {

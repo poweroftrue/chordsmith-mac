@@ -210,18 +210,19 @@ extension AppModel {
         defer { isRebuildingShorthands = false }
         let service = libraryService
         let chords = deviceChordsForShorthand
+        let usage = (try? await service.wordFrequencies(days: 90)) ?? [:]
         let realWords = (try? await service.shorthandRealWords(for: chords)) ?? ShorthandLetters.commonTokens
         shorthandRealWords = realWords
         let overrides = (try? await service.shorthandOverrides()) ?? [:]
         shorthandOverrides = overrides
         let catalog = await Task.detached(priority: .userInitiated) {
-            ShorthandBuilder.build(chords: chords, realWords: realWords, overrides: overrides)
+            ShorthandBuilder.build(chords: chords, realWords: realWords, overrides: overrides, usage: usage)
         }.value
         shorthandCatalog = catalog
         shorthandsByWord = catalog.byWord
         shorthandLogger.notice("Shorthand catalog: \(catalog.shorthands.count, privacy: .public) ready from \(chords.count, privacy: .public) chords")
         await reloadShorthandMatcher()
-        shorthandWordUsage = (try? await service.wordFrequencies(days: 90)) ?? [:]
+        shorthandWordUsage = usage
     }
 
     /// Picks up blocked and always-replaced tokens without rebuilding.

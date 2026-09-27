@@ -189,7 +189,7 @@ struct LaptopTabView: View {
     }
 
     private var notNeededList: some View {
-        let reasons: [ShorthandSkipReason] = [.typeTheWord, .noSavings, .notText, .conflict]
+        let reasons: [ShorthandSkipReason] = [.typeTheWord, .noSavings, .awkwardOnLaptop, .notText, .conflict]
         let items = model.shorthandCatalog.skipped.filter { reasons.contains($0.reason) && matchesSearch($0.output) }
         return List {
             ForEach(reasons, id: \.self) { reason in
@@ -297,7 +297,22 @@ struct ShorthandRow: View {
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 3) {
-                LetterKeys(letters: shorthand.letters, together: shorthand.kind == .pressTogether)
+                if shorthand.kind == .pressTogether {
+                    LetterKeys(letters: shorthand.pressKeys ?? shorthand.letters, together: true)
+                } else {
+                    LetterKeys(letters: shorthand.letters)
+                    if let keys = shorthand.pressKeys {
+                        HStack(spacing: 4) {
+                            Text(shorthand.pressAdjusted ? "or press (laptop keys)" : "or press")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            LetterKeys(letters: keys, together: true)
+                        }
+                        .help(shorthand.pressAdjusted
+                            ? "The M4G keys share a finger or are a stretch on a laptop, so these are easier to press together."
+                            : "Press these keys at the same moment.")
+                    }
+                }
                 Text(detail)
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -320,13 +335,12 @@ struct ShorthandRow: View {
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(shorthand.kind == .pressTogether
-            ? "\(shorthand.output): press \(shorthand.letters.map(String.init).joined(separator: " ")) together"
+            ? "\(shorthand.output): press \((shorthand.pressKeys ?? shorthand.letters).map(String.init).joined(separator: " ")) together"
             : "\(shorthand.output): type \(shorthand.letters.map(String.init).joined(separator: " ")), then space")
     }
 
     private var detail: String {
         var parts = ["saves \(shorthand.savedKeystrokes)"]
-        if shorthand.chordSignature != nil, shorthand.kind != .pressTogether { parts.append("or press together") }
         if uses > 0 { parts.append("\(uses.formatted())× in 90 days") }
         return parts.joined(separator: " · ")
     }

@@ -132,6 +132,48 @@ final class ShorthandBuilderTests: XCTestCase {
     }
 }
 
+final class LaptopErgonomicsTests: XCTestCase {
+    private func chord(_ keys: [String], _ output: String) -> ChordEntry {
+        ChordEntry(inputKeys: keys, output: output, profile: .cc2A1, deploymentTarget: .device, source: "test")
+    }
+
+    func testKeysOnOneFingerCantBePressedTogether() {
+        XCTAssertNil(LaptopErgonomics.cost(Array("wx")), "both left ring finger")
+        XCTAssertNil(LaptopErgonomics.cost(Array("lo")), "both right ring finger")
+        XCTAssertNil(LaptopErgonomics.cost(Array("tg")), "both left index finger")
+        XCTAssertTrue(LaptopErgonomics.isComfortable(Array("te")))
+        XCTAssertTrue(LaptopErgonomics.isComfortable(Array("dlm")))
+        XCTAssertNil(LaptopErgonomics.cost(Array("abcde")), "five keys is too many")
+    }
+
+    func testComfortableChordsKeepTheirKeys() throws {
+        let catalog = ShorthandBuilder.build(chords: [chord(["e", "t"], "the")], realWords: [])
+        let the = try XCTUnwrap(catalog.shorthands.first)
+        XCTAssertEqual(the.pressKeys, "te")
+        XCTAssertFalse(the.pressAdjusted)
+    }
+
+    func testChordsThatShareAFingerGetEasierKeysFromTheirOwn() throws {
+        let catalog = ShorthandBuilder.build(chords: [chord(["d", "l", "m", "o"], "model")], realWords: [])
+        let model = try XCTUnwrap(catalog.shorthands.first)
+        XCTAssertTrue(model.pressAdjusted)
+        let keys = try XCTUnwrap(model.pressKeys)
+        XCTAssertTrue(LaptopErgonomics.isComfortable(Array(keys)))
+        XCTAssertTrue(Set(keys).isSubset(of: Set("dlmo")), "reuses keys you already know")
+        XCTAssertEqual(ShorthandMatcher(catalog: catalog, realWords: []).matchChord(keys)?.text, "model")
+    }
+
+    func testFrequentWordsPickFirst() throws {
+        // Both would like m+e; the word you write more gets it.
+        let chords = [chord(["m", "h", "t"], "them"), chord(["m", "n", "e"], "menu")]
+        let catalog = ShorthandBuilder.build(chords: chords, realWords: [], usage: ["them": 500, "menu": 3])
+        let them = try XCTUnwrap(catalog.shorthands.first { $0.word == "them" })
+        let menu = try XCTUnwrap(catalog.shorthands.first { $0.word == "menu" })
+        XCTAssertNotNil(them.pressKeys)
+        XCTAssertNotEqual(them.chordSignature, menu.chordSignature)
+    }
+}
+
 private struct ShorthandTempDirectory {
     let url: URL
 
