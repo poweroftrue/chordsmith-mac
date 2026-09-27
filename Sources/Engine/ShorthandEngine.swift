@@ -359,12 +359,17 @@ public final class ShorthandEngine: @unchecked Sendable {
             replacement = found
         }
 
-        perform(replacement, proxy: proxy, keyMap: state.keyMap)
         guard type == .keyDown else {
-            // A chord fires on release; the key-up itself goes through.
+            // A chord fires on release. Deliver that release first: while
+            // the key still counts as held, macOS drops a typed copy of it
+            // (t+e came out as `he` or `th`).
+            (event.copy() ?? event).tapPostEvent(proxy)
+            usleep(1_000)
+            perform(replacement, proxy: proxy, keyMap: state.keyMap)
             notify(replacement)
-            return pass
+            return nil
         }
+        perform(replacement, proxy: proxy, keyMap: state.keyMap)
         suppressedKeyUps.insert(keyCode)
         notify(replacement)
         return nil
