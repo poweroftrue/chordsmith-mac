@@ -221,6 +221,15 @@ struct StatsTabView<Details: View>: View {
                 swatch: StatsPalette.blended
             )
             StatTile(
+                title: "Keyboard speed",
+                value: (totals.keyboardSpeedWPM ?? totals.keyboardWPM).map { "\(Int($0.rounded())) WPM" } ?? "—",
+                delta: comparable && totals.keyboardSpeedWPM != nil && previous.keyboardSpeedWPM != nil
+                    ? .relative(current: totals.keyboardSpeedWPM, previous: previous.keyboardSpeedWPM, higherIsBetter: true)
+                    : nil,
+                footnote: keyboardSpeedFootnote,
+                swatch: StatsPalette.keyboard
+            )
+            StatTile(
                 title: "Errors",
                 value: totals.errorRate.map { String(format: "%.1f", $0 * 100) } ?? "—",
                 delta: comparable ? .points(current: totals.errorRate, previous: previous.errorRate, higherIsBetter: false) : nil,
@@ -244,6 +253,18 @@ struct StatsTabView<Details: View>: View {
     }
 
     /// Chords and letters behind the blend, or what is still being measured.
+    /// Laptop and other keyboards, laptop shorthand words included.
+    private var keyboardSpeedFootnote: String {
+        let totals = report.totals
+        if totals.keyboardSpeedWPM == nil {
+            return totals.keyboardWPM == nil ? "measuring: type on the laptop" : "measuring · letter timing"
+        }
+        if totals.shorthandWords > 0 {
+            return "laptop · \(totals.shorthandWords.formatted()) shorthand words"
+        }
+        return "laptop and other keyboards"
+    }
+
     private var m4gSpeedFootnote: String {
         let totals = report.totals
         if totals.m4gBlendedWPM != nil {
