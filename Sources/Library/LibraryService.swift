@@ -2149,3 +2149,200 @@ extension LibraryService {
     }
 }
 
+
+// MARK: - Laptop shorthand
+
+public struct ShorthandTokenState: Hashable, Sendable {
+    public let token: String
+    public let undoCount: Int
+    /// "blocked", "allowed" or nil.
+    public let state: String?
+}
+
+public struct ShorthandDayStats: Hashable, Sendable {
+    public var expansions = 0
+    public var savedKeystrokes = 0
+    public var undos = 0
+
+    public init(expansions: Int = 0, savedKeystrokes: Int = 0, undos: Int = 0) {
+        self.expansions = expansions
+        self.savedKeystrokes = savedKeystrokes
+        self.undos = undos
+    }
+}
+
+extension LibraryService {
+    /// Undos before a token is never replaced again.
+    public static let shorthandUndoLimit = 2
+
+    /// Words that must never be replaced: common English words among the
+    /// letters these chords could be typed as, words you have typed a few
+    /// times (your vocabulary, jargon, names, commands), and common tokens.
+    public func shorthandRealWords(for chords: [ChordEntry], minimumCount: Int = 3) throws -> Set<String> {
+        var words = ShorthandLetters.englishWords(among: ShorthandBuilder.candidateTokens(for: chords))
+        words.formUnion(ShorthandLetters.commonTokens)
+        words.formUnion(ShorthandLetters.literalWords)
+        let typed = try database.query(
+            """
+            SELECT word FROM daily_word_stats
+            WHERE source IN ('keyboard', 'keyboard_away', 'm4g_typing', 'nexus_import')
+            GROUP BY word
+            HAVING SUM(frequency) >= ?
+            """,
+            bindings: [.integer(Int64(minimumCount))]
+        )
+        for row in typed {
+            if let word = row.string("word") { words.insert(word.lowercased()) }
+        }
+        return words
+    }
+
+    public func shorthandOverrides() throws -> [UUID: ShorthandOverride] {
+        var result: [UUID: ShorthandOverride] = [:]
+        for row in try database.query("SELECT chord_id, letters, disabled FROM shorthand_overrides") {
+            guard let id = row.string("chord_id").flatMap(UUID.init(uuidString:)) else { continue }
+            result[id] = ShorthandOverride(
+                chordID: id,
+                letters: row.string("letters"),
+                disabled: (row.integer("disabled") ?? 0) != 0
+            )
+        }
+        return result
+    }
+
+    /// Saves your letters for a chord's shorthand, or turns it off. Passing
+    /// neither restores the automatic shorthand.
+    public func setShorthandOverride(chordID: UUID, letters: String?, disabled: Bool) throws {
+        let trimmed = letters?.trimmingCharacters(in: .whitespaces).lowercased()
+        if (trimmed ?? "").isEmpty && !disabled {
+            try database.execute("DELETE FROM shorthand_overrides WHERE chord_id = ?", bindings: [.text(chordID.uuidString)])
+            return
+        }
+        try database.execute(
+            """
+            INSERT INTO shorthand_overrides (chord_id, letters, disabled, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chord_id) DO UPDATE SET
+                letters = excluded.letters,
+                disabled = excluded.disabled,
+                updated_at = excluded.updated_at
+            """,
+            bindings: [
+                .text(chordID.uuidString),
+                (trimmed ?? "").isEmpty ? .null : .text(trimmed ?? ""),
+                .integer(disabled ? 1 : 0),
+                .double(Date().timeIntervalSince1970)
+            ]
+        )
+    }
+
+    public func shorthandTokenStates() throws -> [ShorthandTokenState] {
+        try database.query("SELECT token, undo_count, state FROM shorthand_tokens ORDER BY updated_at DESC").compactMap { row in
+            guard let token = row.string("token") else { return nil }
+            return ShorthandTokenState(token: token, undoCount: Int(row.integer("undo_count") ?? 0), state: row.string("state"))
+        }
+    }
+
+    /// Counts an undo of `token`. Returns true once it has been undone often
+    /// enough to be blocked for good.
+    @discardableResult
+    public func recordShorthandUndo(token: String, at date: Date = .now) throws -> Bool {
+        let token = token.lowercased()
+        try database.execute(
+            """
+            INSERT INTO shorthand_tokens (token, undo_count, state, updated_at)
+            VALUES (?, 1, NULL, ?)
+            ON CONFLICT(token) DO UPDATE SET
+                undo_count = undo_count + 1,
+                updated_at = excluded.updated_at
+            """,
+            bindings: [.text(token), .double(date.timeIntervalSince1970)]
+        )
+        try database.execute(
+            """
+            INSERT INTO daily_shorthand_stats (day, undos) VALUES (?, 1)
+            ON CONFLICT(day) DO UPDATE SET undos = undos + 1
+            """,
+            bindings: [.text(usageDay(for: date))]
+        )
+        let count = try database.query("SELECT undo_count, state FROM shorthand_tokens WHERE token = ?", bindings: [.text(token)]).first
+        guard let undos = count?.integer("undo_count"), count?.string("state") != "allowed" else { return false }
+        if undos >= Int64(Self.shorthandUndoLimit) {
+            try setShorthandTokenState(token, state: "blocked")
+            return true
+        }
+        return false
+    }
+
+    /// "blocked" never replaces the token, "allowed" always does, nil
+    /// forgets it.
+    public func setShorthandTokenState(_ token: String, state: String?) throws {
+        let token = token.lowercased()
+        if state == nil {
+            try database.execute("DELETE FROM shorthand_tokens WHERE token = ?", bindings: [.text(token)])
+            return
+        }
+        try database.execute(
+            """
+            INSERT INTO shorthand_tokens (token, undo_count, state, updated_at)
+            VALUES (?, 0, ?, ?)
+            ON CONFLICT(token) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at
+            """,
+            bindings: [.text(token), state.map { .text($0) } ?? .null, .double(Date().timeIntervalSince1970)]
+        )
+    }
+
+    public func recordShorthandExpansion(savedKeystrokes: Int, at date: Date = .now) throws {
+        try database.execute(
+            """
+            INSERT INTO daily_shorthand_stats (day, expansions, saved_keystrokes) VALUES (?, 1, ?)
+            ON CONFLICT(day) DO UPDATE SET
+                expansions = expansions + 1,
+                saved_keystrokes = saved_keystrokes + excluded.saved_keystrokes
+            """,
+            bindings: [.text(usageDay(for: date)), .integer(Int64(max(savedKeystrokes, 0)))]
+        )
+    }
+
+    /// Totals for today and for the last `days` days.
+    public func shorthandStats(days: Int = 30, now: Date = .now) throws -> (today: ShorthandDayStats, period: ShorthandDayStats) {
+        let today = usageDay(for: now)
+        let start = usageDay(for: Calendar.current.date(byAdding: .day, value: -(days - 1), to: now) ?? now)
+        var todayStats = ShorthandDayStats()
+        var periodStats = ShorthandDayStats()
+        for row in try database.query(
+            "SELECT day, expansions, saved_keystrokes, undos FROM daily_shorthand_stats WHERE day >= ?",
+            bindings: [.text(start)]
+        ) {
+            let stats = ShorthandDayStats(
+                expansions: Int(row.integer("expansions") ?? 0),
+                savedKeystrokes: Int(row.integer("saved_keystrokes") ?? 0),
+                undos: Int(row.integer("undos") ?? 0)
+            )
+            periodStats.expansions += stats.expansions
+            periodStats.savedKeystrokes += stats.savedKeystrokes
+            periodStats.undos += stats.undos
+            if row.string("day") == today { todayStats = stats }
+        }
+        return (todayStats, periodStats)
+    }
+
+    /// How often each word was written in the last `days` days, any way.
+    public func wordFrequencies(days: Int = 90, now: Date = .now) throws -> [String: Int] {
+        let start = usageDay(for: Calendar.current.date(byAdding: .day, value: -(days - 1), to: now) ?? now)
+        var result: [String: Int] = [:]
+        for row in try database.query(
+            """
+            SELECT word, SUM(frequency) AS frequency FROM daily_word_stats
+            WHERE day >= ? AND source != 'nexus_import'
+            GROUP BY word
+            """,
+            bindings: [.text(start)]
+        ) {
+            if let word = row.string("word"), let frequency = row.integer("frequency") {
+                result[word.lowercased(), default: 0] += Int(frequency)
+            }
+        }
+        return result
+    }
+}

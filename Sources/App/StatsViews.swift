@@ -19,6 +19,9 @@ enum StatsPalette {
     static let misfires = dynamic(light: 0xE34948, dark: 0xE66767)
     /// Everything on the Master Forge together: a neutral, emphasized line.
     static let blended = Color.primary.opacity(0.75)
+    /// Laptop shorthand: a chord's word, written on the laptop. A lighter
+    /// tint of the chorded blue, since it comes from the same chord.
+    static let shorthand = chorded.opacity(0.5)
     static let context = Color.secondary.opacity(0.45)
     static let grid = Color.secondary.opacity(0.18)
 
@@ -168,6 +171,9 @@ struct StatsTabView<Details: View>: View {
         }
         if totals.awayWords > 0 {
             parts.append("\(totals.awayWords.formatted()) words typed with no M4G connected don't count against your chord rate")
+        }
+        if totals.shorthandWords > 0 {
+            parts.append("\(totals.shorthandWords.formatted()) words came from laptop shorthands")
         }
         let sentence = parts.joined(separator: "; ") + "."
         return sentence.prefix(1).uppercased() + sentence.dropFirst()
@@ -640,6 +646,7 @@ private struct WordsChartCard: View {
             var cumulative = 0.0
             let parts: [(String, Color, Int)] = [
                 ("Chorded", StatsPalette.chorded, bucket.chordedWords),
+                ("Laptop shorthand", StatsPalette.shorthand, bucket.shorthandWords),
                 ("Typed on M4G", StatsPalette.m4gTyped, bucket.m4gTypedWords),
                 ("Other keyboard", StatsPalette.keyboard, bucket.keyboardWords),
                 ("M4G not connected", StatsPalette.context, bucket.awayWords)
@@ -673,6 +680,10 @@ private struct WordsChartCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 14) {
                     LegendItem(color: StatsPalette.chorded, label: "Chorded", value: report.totals.chordedWords.formatted())
+                    if report.totals.shorthandWords > 0 {
+                        LegendItem(color: StatsPalette.shorthand, label: "Laptop shorthand", value: report.totals.shorthandWords.formatted())
+                            .help("Chord words written on the laptop keyboard by typing the chord's letters, then Space.")
+                    }
                     LegendItem(color: StatsPalette.m4gTyped, label: "Typed on M4G", value: report.totals.m4gTypedWords.formatted())
                     LegendItem(color: StatsPalette.keyboard, label: "Other keyboard", value: report.totals.keyboardWords.formatted())
                     if report.totals.awayWords > 0 {
@@ -696,7 +707,9 @@ private struct WordsChartCard: View {
 
     private var summary: String {
         if let selected {
-            return "\(ChartAxes.readoutDate(selected.start, period: report.period)): \(selected.words.formatted()) words · \(selected.chordedWords.formatted()) chorded · \(selected.m4gTypedWords.formatted()) typed on M4G · \(selected.keyboardWords.formatted()) other keyboard"
+            var text = "\(ChartAxes.readoutDate(selected.start, period: report.period)): \(selected.words.formatted()) words · \(selected.chordedWords.formatted()) chorded · \(selected.m4gTypedWords.formatted()) typed on M4G · \(selected.keyboardWords.formatted()) other keyboard"
+            if selected.shorthandWords > 0 { text += " · \(selected.shorthandWords.formatted()) laptop shorthand" }
+            return text
         }
         var text = "Average \(Int(average.rounded()).formatted()) words per active \(report.period.bucketsByMonth ? "month" : "day")"
         if let best = report.bestDay {
@@ -754,6 +767,7 @@ private struct WordsChartCard: View {
                 valueName: "words",
                 series: [
                     ("Chorded", report.buckets.map { ($0.start, Double($0.chordedWords)) }),
+                    ("Laptop shorthand", report.buckets.map { ($0.start, Double($0.shorthandWords)) }),
                     ("Typed on M4G", report.buckets.map { ($0.start, Double($0.m4gTypedWords)) }),
                     ("Other keyboard", report.buckets.map { ($0.start, Double($0.keyboardWords)) }),
                     ("M4G not connected", report.buckets.map { ($0.start, Double($0.awayWords)) })
@@ -771,6 +785,7 @@ private struct WordsChartCard: View {
                 Text("M4G")
                 Text("Other")
                 Text("No M4G")
+                Text("Shorthand")
                 Text("Total")
             }
             .font(.caption.weight(.semibold))
@@ -782,6 +797,7 @@ private struct WordsChartCard: View {
                     Text(bucket.m4gTypedWords.formatted())
                     Text(bucket.keyboardWords.formatted())
                     Text(bucket.awayWords.formatted())
+                    Text(bucket.shorthandWords.formatted())
                     Text(bucket.words.formatted()).fontWeight(.semibold)
                 }
                 .font(.caption.monospacedDigit())

@@ -12,6 +12,7 @@ enum PanelTab: String, CaseIterable, Identifiable {
     case staged
     case grow
     case practice
+    case laptop
     case usage
 
     var id: String { rawValue }
@@ -94,10 +95,7 @@ final class AppModel: ObservableObject {
     @Published var statusText = "Starting…"
     @Published var bootstrapProgress: (current: Int, total: Int)?
     @Published var lastError: String?
-    @Published var engineEnabled = true
     @Published var inputObservationEnabled = true
-    @Published var activeSoftwareProfile: ErgonomicProfile = .ansiQwerty
-    @Published var excludedBundleIDsText = ""
     @Published var suggestionProfile: ErgonomicProfile = .ansiQwerty
     @Published private(set) var launchAtLoginEnabled = false
     @Published private(set) var launchAtLoginNeedsApproval = false
@@ -153,13 +151,35 @@ final class AppModel: ObservableObject {
     @Published private(set) var isLoadingStats = false
     @Published private(set) var hasLoadedPracticeReport = false
 
+    // Laptop shorthand
+    @Published var shorthandSettings = ShorthandSettings()
+    @Published var shorthandStatus: ShorthandStatus = .off
+    @Published var shorthandCatalog = ShorthandCatalog.empty
+    @Published var shorthandMatcher = ShorthandMatcher.empty
+    @Published var shorthandToday = ShorthandDayStats()
+    @Published var shorthandPeriod = ShorthandDayStats()
+    @Published var shorthandTokenStates: [ShorthandTokenState] = []
+    @Published var shorthandWordUsage: [String: Int] = [:]
+    @Published var shorthandOverrides: [UUID: ShorthandOverride] = [:]
+    /// The app you were last typing in, for "Pause in …".
+    @Published var lastExternalApp: (bundleID: String, name: String)?
+    @Published var isRebuildingShorthands = false
+    var shorthandsByWord: [String: LaptopShorthand] = [:]
+    var deviceChordsForShorthand: [ChordEntry] = []
+    var shorthandRealWords: Set<String>?
+    var hasStartedShorthand = false
+    var shorthandPermissionTask: Task<Void, Never>?
+    var shorthandObservers: [NSObjectProtocol] = []
+    var forgeConnectionCancellable: AnyCancellable?
+    var awayWordCounts: [String: Int] = [:]
+
     /// Opens the panel in a standalone window; set by the app delegate.
     var openWindowAction: (() -> Void)?
 
     let libraryService: LibraryService
     let deviceService: any AppDeviceService
     let recorder: TypingRecorder
-    let engine: ChordEngine
+    let shorthandEngine: ShorthandEngine
     let inputObserver: InputObservationEngine
     private let launchAtLoginController: LaunchAtLoginController
     private static let pendingDeviceMutationsSettingKey = "device.pending_mutations.v1"
@@ -174,7 +194,7 @@ final class AppModel: ObservableObject {
         self.libraryService = libraryService
         self.deviceService = deviceService
         self.recorder = TypingRecorder(libraryService: libraryService)
-        self.engine = ChordEngine(recorder: recorder)
+        self.shorthandEngine = ShorthandEngine()
         self.inputObserver = InputObservationEngine(recorder: recorder)
         self.launchAtLoginController = LaunchAtLoginController()
     }
@@ -192,17 +212,17 @@ final class AppModel: ObservableObject {
                 statusText = "Could not clean legacy usage data"
             }
             await refresh()
-            engine.start()
             await startCoaching()
             if inputObservationEnabled {
                 inputObserver.start()
             }
+            await startShorthand()
             statusText = "Ready"
         }
     }
 
     func stop() {
-        engine.stop()
+        shorthandEngine.stop()
         inputObserver.stop()
         coachRefreshTask?.cancel()
     }
@@ -250,6 +270,7 @@ final class AppModel: ObservableObject {
     func handleRecordedWord(_ event: RecordedWord) {
         if !Calendar.current.isDateInToday(liveTodayUsage.day) {
             liveTodayUsage = TodayUsage()
+            awayWordCounts = [:]
         }
         liveTodayUsage.record(
             word: event.word,
@@ -268,12 +289,21 @@ final class AppModel: ObservableObject {
         }
         guard let nudge = coachEngine.nudge(
             for: event,
-            handCountToday: liveTodayUsage.handCounts[event.word] ?? 0,
+            handCountToday: liveTodayUsage.handCounts[event.word] ?? awayCounts(event),
             snapshot: coachSnapshot,
             suggestions: growthSuggestionInputs,
-            settings: coachSettings
+            settings: coachSettings,
+            shorthands: shorthandsByWord,
+            shorthandActive: shorthandStatus == .active
         ) else { return }
         currentNudge = nudge
+    }
+
+    /// Laptop words typed in full today, for the shorthand hint.
+    private func awayCounts(_ event: RecordedWord) -> Int {
+        guard event.source == .keyboardAway else { return 0 }
+        awayWordCounts[event.word, default: 0] += 1
+        return awayWordCounts[event.word] ?? 0
     }
 
     /// First-choice chords for the words Grow ranks highest.
@@ -430,17 +460,10 @@ final class AppModel: ObservableObject {
         do {
             chords = try await libraryService.allChords()
             suggestions = try await libraryService.listSuggestions(profile: suggestionProfile)
-            let activeChords = try await libraryService.activeChords(for: activeSoftwareProfile)
             let deviceChords = try await libraryService.deviceChords()
-            engine.updateChords(activeChords)
             await recorder.updateDeviceChords(deviceChords)
-            engine.updateConfiguration(
-                EngineConfiguration(
-                    enabled: engineEnabled,
-                    activeProfile: activeSoftwareProfile,
-                    excludedBundleIDs: parsedExcludedBundleIDs()
-                )
-            )
+            deviceChordsForShorthand = deviceChords
+            if hasStartedShorthand { await rebuildShorthands() }
             deviceSource = try await libraryService.sources().first(where: { $0.isPrimary })
             await loadUsageReport()
         } catch {
@@ -1274,39 +1297,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func saveSettings() async {
-        do {
-            try await libraryService.setSetting("engine.enabled", value: engineEnabled ? "1" : "0")
-            try await libraryService.setSetting("engine.profile", value: activeSoftwareProfile.rawValue)
-            try await libraryService.setSetting("engine.excluded_bundle_ids", value: excludedBundleIDsText)
-            engine.updateConfiguration(
-                EngineConfiguration(
-                    enabled: engineEnabled,
-                    activeProfile: activeSoftwareProfile,
-                    excludedBundleIDs: parsedExcludedBundleIDs()
-                )
-            )
-            let activeChords = try await libraryService.activeChords(for: activeSoftwareProfile)
-            engine.updateChords(activeChords)
-            statusText = "Settings saved"
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
     private func loadSettings() async {
-        do {
-            if let enabled = try await libraryService.stringSetting(forKey: "engine.enabled") {
-                engineEnabled = enabled == "1"
-            }
-            if let profile = try await libraryService.stringSetting(forKey: "engine.profile"),
-               let parsed = ErgonomicProfile(rawValue: profile) {
-                activeSoftwareProfile = parsed
-            }
-            excludedBundleIDsText = try await libraryService.stringSetting(forKey: "engine.excluded_bundle_ids") ?? ""
-        } catch {
-            lastError = error.localizedDescription
-        }
+        await loadShorthandSettings()
     }
 
     private func configureLaunchAtLogin() async {
@@ -1417,15 +1409,6 @@ final class AppModel: ObservableObject {
         return ActionCodec.chordActions(forTokens: chord.inputKeys)
             .map(ActionCodec.stringifyChordActions)?
             .uppercased()
-    }
-
-    private func parsedExcludedBundleIDs() -> Set<String> {
-        Set(
-            excludedBundleIDsText
-                .split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-        )
     }
 
     private static func timestamp() -> String {

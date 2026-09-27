@@ -25,6 +25,7 @@ public final class InputObservationEngine: ObservableObject {
         case deleteLine
         case delimiter(Date)
         case completionKey(Date)
+        case shorthand(ShorthandEvent)
     }
 
     private enum ResolvedRecorderEvent: Sendable {
@@ -34,6 +35,7 @@ public final class InputObservationEngine: ObservableObject {
         case deleteLine
         case delimiter(Date)
         case completionKey(Date)
+        case shorthand(ShorthandEvent)
         case flush
     }
 
@@ -196,6 +198,14 @@ public final class InputObservationEngine: ObservableObject {
         return Unmanaged.passUnretained(event)
     }
 
+    /// A laptop shorthand replaced the letters just typed. The replacement
+    /// happens after this listener saw the keys, so the recorder swaps the
+    /// letters for the output in its own copy of the word.
+    public func noteShorthand(_ event: ShorthandEvent) {
+        guard isRunning else { return }
+        enqueue(.shorthand(event))
+    }
+
     private func m4gConnectionChanged(halves: Int) {
         let connected = halves > 0
         if isRunning || eventTap != nil {
@@ -234,7 +244,7 @@ public final class InputObservationEngine: ObservableObject {
                 switch source {
                 case .m4g: m4gKeys += 1
                 case .keyboard: otherKeys += 1
-                case .unknown: break
+                case .unknown, .shorthand: break
                 }
                 return .text(text, source: source, capturedAt: capturedAt)
             case .backspace:
@@ -247,6 +257,8 @@ public final class InputObservationEngine: ObservableObject {
                 return .delimiter(timestamp)
             case .completionKey(let timestamp):
                 return .completionKey(timestamp)
+            case .shorthand(let event):
+                return .shorthand(event)
             }
         }
         if m4gKeys > 0 { m4gAttributedKeyCount += m4gKeys }
@@ -280,6 +292,13 @@ public final class InputObservationEngine: ObservableObject {
                     await recorder.observeDelimiter(at: timestamp)
                 case .completionKey(let timestamp):
                     await recorder.observeCompletionKey(at: timestamp)
+                case .shorthand(let event):
+                    await recorder.observeShorthand(
+                        kind: event.kind,
+                        typed: event.typed,
+                        output: event.output,
+                        trigger: event.trigger
+                    )
                 case .flush:
                     await recorder.flush()
                 }

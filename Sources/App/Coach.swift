@@ -13,6 +13,8 @@ struct Nudge: Identifiable, Equatable {
         case typo(intended: String)
         /// You keep typing a word with no chord; here is one.
         case suggestion(candidate: [String])
+        /// On the laptop: the word has a shorthand.
+        case shorthand(letters: String)
     }
 
     let id = UUID()
@@ -67,12 +69,31 @@ struct CoachEngine {
         snapshot: CoachingSnapshot,
         suggestions: [String: [String]],
         settings: CoachSettings,
+        shorthands: [String: LaptopShorthand] = [:],
+        shorthandActive: Bool = false,
         now: Date = .now
     ) -> Nudge? {
-        guard settings.enabled,
-              event.source == .keyboard || event.source == .m4gTyping,
-              !(settings.m4gOnly && event.source != .m4gTyping),
-              event.word.count >= 2 else { return nil }
+        guard settings.enabled, event.word.count >= 2 else { return nil }
+
+        // Without the Forge, the only faster way is the laptop shorthand.
+        if event.source == .keyboardAway {
+            guard settings.forgotten, shorthandActive,
+                  let shorthand = shorthands[event.word], shorthand.savedKeystrokes >= 2 else { return nil }
+            let nudge = Nudge(
+                kind: .shorthand(letters: shorthand.letters),
+                word: event.word,
+                input: shorthand.letters.map { String($0) } + ["space"],
+                detail: handCountToday > 1
+                    ? "Typed in full \(handCountToday)× today. Type \(shorthand.letters) then Space"
+                    : "Type \(shorthand.letters) then Space, any letter order"
+            )
+            guard isAllowed(word: nudge.word, settings: settings, now: now) else { return nil }
+            record(nudge, now: now)
+            return nudge
+        }
+
+        guard event.source == .keyboard || event.source == .m4gTyping,
+              !(settings.m4gOnly && event.source != .m4gTyping) else { return nil }
 
         let candidate: Nudge?
         if settings.forgotten, let input = snapshot.chordInputs[event.word] {
@@ -174,7 +195,7 @@ final class NudgePanelController {
             }
         }
         NSAccessibility.post(element: hosting, notification: .announcementRequested, userInfo: [
-            .announcement: "\(nudge.title). Chord \(nudge.input.joined(separator: " plus ")).",
+            .announcement: announcement(for: nudge),
             .priority: NSAccessibilityPriorityLevel.medium.rawValue
         ])
         if case .suggestion = nudge.kind {
@@ -182,6 +203,13 @@ final class NudgePanelController {
         } else {
             scheduleDismiss(after: 4.5)
         }
+    }
+
+    private func announcement(for nudge: Nudge) -> String {
+        if case .shorthand(let letters) = nudge.kind {
+            return "\(nudge.title). Type \(letters) then space."
+        }
+        return "\(nudge.title). Chord \(nudge.input.joined(separator: " plus "))."
     }
 
     func dismiss() {
@@ -315,6 +343,7 @@ struct NudgeView: View {
         case .forgotten: return "keyboard.chevron.compact.down"
         case .typo: return "textformat.abc.dottedunderline"
         case .suggestion: return "sparkles"
+        case .shorthand: return "laptopcomputer"
         }
     }
 
@@ -323,6 +352,7 @@ struct NudgeView: View {
         case .forgotten: return StatsPalette.chorded
         case .typo: return StatsPalette.typos
         case .suggestion: return StatsPalette.library
+        case .shorthand: return StatsPalette.chorded
         }
     }
 }

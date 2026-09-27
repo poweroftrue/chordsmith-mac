@@ -41,6 +41,8 @@ public struct StatsBucket: Codable, Hashable, Sendable, Identifiable {
     public var keyboardWords = 0
     /// Typed while no Master Forge was connected: no chord was possible.
     public var awayWords = 0
+    /// Replaced from a laptop shorthand (chord letters typed, then Space).
+    public var shorthandWords = 0
     /// Chord outputs recorded, including multi-word phrases.
     public var chordsUsed = 0
     /// Uses of words that are almost certainly misspellings.
@@ -74,7 +76,7 @@ public struct StatsBucket: Codable, Hashable, Sendable, Identifiable {
         self.start = start
     }
 
-    public var words: Int { chordedWords + m4gTypedWords + keyboardWords + awayWords }
+    public var words: Int { chordedWords + m4gTypedWords + keyboardWords + awayWords + shorthandWords }
     public var handTypedWords: Int { m4gTypedWords + keyboardWords + awayWords }
     /// Words written while a chord was possible.
     public var chordableWords: Int { chordedWords + m4gTypedWords + keyboardWords }
@@ -123,6 +125,7 @@ public struct StatsBucket: Codable, Hashable, Sendable, Identifiable {
         m4gTypedWords += other.m4gTypedWords
         keyboardWords += other.keyboardWords
         awayWords += other.awayWords
+        shorthandWords += other.shorthandWords
         chordsUsed += other.chordsUsed
         typoWords += other.typoWords
         coveredWords += other.coveredWords
@@ -371,10 +374,14 @@ public struct StatsBuilder: Sendable {
                     bucket.awayWords += row.frequency
                     bucket.keyboardLetters += letters
                     bucket.keyboardMs += time
+                case .laptopShorthand:
+                    bucket.shorthandWords += row.frequency
                 case .nexusImport:
                     break
                 }
-                if hasChord, row.source != .keyboardAway { bucket.coveredWords += row.frequency }
+                if hasChord, row.source != .keyboardAway, row.source != .laptopShorthand {
+                    bucket.coveredWords += row.frequency
+                }
                 if isTypo { bucket.typoWords += row.frequency }
                 if !hasChord, row.source == .keyboard || row.source == .m4gTyping {
                     bucket.unchordedMs += time

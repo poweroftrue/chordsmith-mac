@@ -64,10 +64,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { nudge in nudgeController.show(nudge) }
             .store(in: &observers)
         model.$todayUsage
-            .combineLatest(model.$showChordRateInMenuBar, model.inputObserver.$isM4GConnected)
+            .combineLatest(model.$showChordRateInMenuBar, model.inputObserver.$isM4GConnected, model.$shorthandStatus)
             .receive(on: RunLoop.main)
-            .sink { [weak self] usage, visible, connected in
-                self?.updateStatusItem(usage: usage, visible: visible, m4gConnected: connected)
+            .sink { [weak self] usage, visible, connected, shorthand in
+                self?.updateStatusItem(usage: usage, visible: visible, m4gConnected: connected, shorthand: shorthand)
             }
             .store(in: &observers)
         setupStatusItem()
@@ -141,9 +141,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Today's chord rate beside the menu bar icon, with the details and the
     /// goal in the tooltip.
-    private func updateStatusItem(usage: TodayUsage, visible: Bool, m4gConnected: Bool) {
+    private func updateStatusItem(usage: TodayUsage, visible: Bool, m4gConnected: Bool, shorthand: ShorthandStatus) {
         guard let button = statusItem?.button else { return }
-        let pausedNote = "Master Forge not connected: chord hints are paused and typing doesn't count against your chord rate."
+        let pausedNote = shorthand == .active
+            ? "Master Forge not connected: laptop shorthand is on. Type a chord's letters, then Space."
+            : "Master Forge not connected: chord hints are paused and typing doesn't count against your chord rate."
         guard visible, let rate = usage.chordRate, usage.words >= 20 else {
             button.title = ""
             button.imagePosition = .imageOnly
@@ -406,6 +408,9 @@ struct RootView: View {
                 PracticeTabView(model: model)
                     .tabItem { Label("Practice", systemImage: "target") }
                     .tag(PanelTab.practice)
+                LaptopTabView(model: model)
+                    .tabItem { Label("Laptop", systemImage: "laptopcomputer") }
+                    .tag(PanelTab.laptop)
                 usageTab
                     .tabItem { Label("Stats", systemImage: "chart.bar.xaxis") }
                     .tag(PanelTab.usage)
@@ -1149,7 +1154,7 @@ struct RootView: View {
             case .add:
                 focusedField = nil
                 addFocusToken += 1
-            case .staged, .grow, .practice, .usage:
+            case .staged, .grow, .practice, .laptop, .usage:
                 focusedField = nil
             }
         }
@@ -1179,6 +1184,8 @@ struct RootView: View {
             }
         case .practice:
             Task { await model.loadPracticeReport() }
+        case .laptop:
+            Task { await model.rebuildShorthands() }
         case .usage:
             Task { await model.loadUsageReport() }
         }
@@ -1338,6 +1345,11 @@ struct ActionTokenRow: View {
 struct SettingsView: View {
     @ObservedObject var model: AppModel
 
+    static func appName(for bundleID: String) -> String {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return bundleID }
+        return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
+    }
+
     var body: some View {
         Form {
             Section("Quick Panel") {
@@ -1362,7 +1374,7 @@ struct SettingsView: View {
                 }
                 .disabled(!model.coachSettings.enabled)
                 Toggle("Show today's chord rate in the menu bar", isOn: $model.showChordRateInMenuBar)
-                Text("Hints appear under the menu bar without taking focus, and fade on their own. They pause automatically while no Master Forge is connected.")
+                Text("Hints appear under the menu bar without taking focus, and fade on their own. With no Master Forge connected, they only point out laptop shorthands.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1374,13 +1386,20 @@ struct SettingsView: View {
             }
 
 
-            Section("Engine") {
-                Toggle("Enable software chording", isOn: $model.engineEnabled)
-                Picker("Software profile", selection: $model.activeSoftwareProfile) {
-                    Text(ErgonomicProfile.ansiQwerty.displayName).tag(ErgonomicProfile.ansiQwerty)
-                    Text(ErgonomicProfile.ansiColemak.displayName).tag(ErgonomicProfile.ansiColemak)
-                    Text(ErgonomicProfile.ansiColemakDH.displayName).tag(ErgonomicProfile.ansiColemakDH)
+            Section("Laptop shorthand") {
+                Toggle("Type chords on the laptop keyboard", isOn: $model.shorthandSettings.enabled)
+                Group {
+                    Toggle("Only while the Master Forge is unplugged", isOn: $model.shorthandSettings.onlyWhenForgeUnplugged)
+                    Toggle("Also replace before , . ; : ! ?", isOn: $model.shorthandSettings.expandOnPunctuation)
+                    Toggle("Backspace right after puts my letters back", isOn: $model.shorthandSettings.undoWithBackspace)
                 }
+                .disabled(!model.shorthandSettings.enabled)
+                Text("Type a chord's letters in any order, then Space: abt → about. Real words are never replaced. Keys are never delayed; only the Space after a shorthand is used.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .onChange(of: model.shorthandSettings) { _ in
+                Task { await model.saveShorthandSettings() }
             }
 
             Section("Startup") {
@@ -1402,16 +1421,21 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Excluded Apps") {
-                TextField("com.apple.Terminal, com.apple.iTerm2", text: $model.excludedBundleIDsText, axis: .vertical)
-                    .lineLimit(3, reservesSpace: true)
-                Text("Comma-separated bundle identifiers. The engine passes through untouched while these apps are frontmost.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Button("Save Settings") {
-                Task { await model.saveSettings() }
+            Section("Shorthand paused in") {
+                if model.shorthandSettings.excludedBundleIDs.isEmpty {
+                    Text("No apps. Pause an app from the Laptop tab while you're using it.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.shorthandSettings.excludedBundleIDs.sorted(), id: \.self) { bundleID in
+                        HStack {
+                            Text(Self.appName(for: bundleID))
+                            Spacer()
+                            Button("Resume") { model.toggleShorthandPause(forBundleID: bundleID) }
+                                .controlSize(.small)
+                        }
+                    }
+                }
             }
         }
         .padding(16)

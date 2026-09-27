@@ -6,6 +6,8 @@ public enum PhysicalInputSource: String, Sendable {
     case m4g
     case keyboard
     case unknown
+    /// Typed by Chordsmith, replacing a laptop shorthand.
+    case shorthand
 }
 
 struct HIDKeyboardDeviceIdentity: Equatable, Sendable {

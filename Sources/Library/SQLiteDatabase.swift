@@ -414,6 +414,38 @@ final class SQLiteDatabase {
             )
             """
         )
+        // Laptop shorthand: your own letters or off switches per chord,
+        // tokens you undid or always want replaced, and daily totals.
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS shorthand_overrides (
+                chord_id TEXT PRIMARY KEY,
+                letters TEXT,
+                disabled INTEGER NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS shorthand_tokens (
+                token TEXT PRIMARY KEY,
+                undo_count INTEGER NOT NULL DEFAULT 0,
+                state TEXT,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_shorthand_stats (
+                day TEXT PRIMARY KEY,
+                expansions INTEGER NOT NULL DEFAULT 0,
+                saved_keystrokes INTEGER NOT NULL DEFAULT 0,
+                undos INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
         try migrateMultilingualWordsIfNeeded()
     }
 

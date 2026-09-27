@@ -64,6 +64,9 @@ public actor UsageRecorder {
     /// Assumed connected until the HID monitor says otherwise, so words are
     /// never marked "away" by mistake.
     private var m4gConnected = true
+    /// An undo was applied before its backspace arrived; that backspace is
+    /// already accounted for.
+    private var skipBackspaces = 0
 
     private let newWordThreshold: TimeInterval = 5.0
     /// Upper bound for the gap between characters of one chord output.
@@ -100,11 +103,12 @@ public actor UsageRecorder {
         _ text: String,
         source: PhysicalInputSource = .keyboard,
         startedAt: Date,
-        endedAt: Date
+        endedAt: Date,
+        countsKeystrokes: Bool = true
     ) async {
         guard !text.isEmpty else { return }
         let characters = Array(text)
-        pendingKeystrokes += characters.count
+        if countsKeystrokes { pendingKeystrokes += characters.count }
         let step = endedAt.timeIntervalSince(startedAt) / Double(max(characters.count, 1))
 
         for (index, character) in characters.enumerated() {
@@ -147,6 +151,10 @@ public actor UsageRecorder {
 
     public func observeBackspace() {
         pendingBackspaces += 1
+        if skipBackspaces > 0 {
+            skipBackspaces -= 1
+            return
+        }
         if !buffer.isEmpty {
             if deletionStart == nil {
                 deletionStart = buffer
@@ -173,6 +181,52 @@ public actor UsageRecorder {
             idleFlushTask = nil
         } else {
             scheduleIdleFlush()
+        }
+    }
+
+    /// A laptop shorthand replaced `typed` with `output`, or an undo put
+    /// `typed` back. The trigger key may or may not have reached the
+    /// recorder yet, so both the open word and the held-back word are checked.
+    public func observeShorthand(kind: ShorthandTyper.ReplacementKind, typed: String, output: String, trigger: String) async {
+        let current = String(buffer.map(\.character))
+        let pending = pendingWord.map { String($0.characters.map(\.character)) }
+        switch kind {
+        case .expand:
+            if current == typed {
+                buffer = Self.retype(output, over: buffer, source: .shorthand)
+            } else if pending == typed, let word = pendingWord {
+                pendingWord = PendingWord(
+                    characters: Self.retype(output, over: word.characters, source: .shorthand),
+                    endedAt: word.endedAt,
+                    trailingDelimiters: word.trailingDelimiters,
+                    delimiters: word.delimiters
+                )
+            }
+        case .undo:
+            if current == output {
+                // The backspace already reopened the word.
+                buffer = Self.retype(typed, over: buffer, source: .keyboard)
+                deletionStart = nil
+                await observeKeyboardText(trigger, source: .keyboard, startedAt: .now, endedAt: .now, countsKeystrokes: false)
+            } else if pending == output, let word = pendingWord {
+                pendingWord = PendingWord(
+                    characters: Self.retype(typed, over: word.characters, source: .keyboard),
+                    endedAt: word.endedAt,
+                    trailingDelimiters: word.trailingDelimiters,
+                    delimiters: word.delimiters
+                )
+                skipBackspaces += 1
+            }
+        }
+    }
+
+    /// New characters spread over the time the old ones took.
+    private static func retype(_ text: String, over old: [BufferedCharacter], source: PhysicalInputSource) -> [BufferedCharacter] {
+        guard let first = old.first?.timestamp, let last = old.last?.timestamp else { return [] }
+        let characters = Array(text)
+        let step = characters.count > 1 ? last.timeIntervalSince(first) / Double(characters.count - 1) : 0
+        return characters.enumerated().map { index, character in
+            BufferedCharacter(character: character, timestamp: first.addingTimeInterval(step * Double(index)), source: source)
         }
     }
 
@@ -334,7 +388,9 @@ public actor UsageRecorder {
             return
         }
         let source: UsageSource
-        if characters.allSatisfy({ $0.source == .m4g }) {
+        if characters.allSatisfy({ $0.source == .shorthand }) {
+            source = .laptopShorthand
+        } else if characters.allSatisfy({ $0.source == .m4g }) {
             source = .m4gTyping
         } else {
             source = m4gConnected ? .keyboard : .keyboardAway
@@ -357,7 +413,7 @@ public actor UsageRecorder {
             wordObserver?(RecordedWord(word: word.text, source: source, avgMs: avgMs / Double(words.count), language: word.language, cycleMs: cycle))
         }
         if words.count == 1, let word = words.first?.text {
-            await notePhraseWord(word, handTyped: true, joinsNext: joinsNext, at: endedAt)
+            await notePhraseWord(word, handTyped: source != .laptopShorthand, joinsNext: joinsNext, at: endedAt)
         } else {
             phraseRun = []
             previousWordJoinsNext = false

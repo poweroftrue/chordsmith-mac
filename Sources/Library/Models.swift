@@ -223,6 +223,8 @@ public enum UsageSource: String, Codable, CaseIterable, Sendable, Identifiable {
     case m4gTyping = "m4g_typing"
     case m4gHIDConfirmed = "m4g_hid_confirmed"
     case softwareChord = "software_chord"
+    /// Replaced from a laptop shorthand (a chord's letters typed, then Space).
+    case laptopShorthand = "laptop_shorthand"
     case nexusImport = "nexus_import"
 
     public var id: String { rawValue }
@@ -244,6 +246,8 @@ public enum UsageSource: String, Codable, CaseIterable, Sendable, Identifiable {
             return "M4G confirmed"
         case .softwareChord:
             return "Software chord"
+        case .laptopShorthand:
+            return "Laptop shorthand"
         case .nexusImport:
             return "Nexus import"
         }

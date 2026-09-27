@@ -20,6 +20,7 @@ It is built for fast local search, quick chord editing, M4G-aware suggestions, a
 - Import and export CharaChorder chord JSON.
 - Commit staged device changes directly to the connected M4G.
 - Queue failed device writes for later retry instead of freezing the UI.
+- Type your chords on a laptop keyboard as shorthands while the Forge is away.
 
 ## Grow: Add Chords In Batches
 
@@ -62,14 +63,52 @@ seconds apart, 10 minutes per word, a per-hour cap you choose) and can be
 limited to typing on the Master Forge. Configure them in Settings › Live
 coaching.
 
-When no Master Forge is connected (both halves unplugged), hints pause
-automatically. Words typed then are recorded as "keyboard, M4G not connected":
+When no Master Forge is connected (both halves unplugged), chord hints pause
+automatically; only laptop shorthand hints remain. Words typed then are recorded as "keyboard, M4G not connected":
 they count toward word totals and typing speed, but not against your chord
 rate, the forgotten-chords list or Grow's ranking, because no chord was
 possible.
 
 The menu bar shows today's chord rate next to the icon; its tooltip adds the
 goal (90% of your 50 most-used chorded words) and today's M4G letter speed.
+
+## Laptop Shorthand
+
+A MacBook keyboard can't press four or five letter keys at once reliably
+(built-in keyboards ghost at three), and holding keys back to detect chords
+makes every keystroke lag. So on the laptop, a chord becomes a shorthand:
+**type the chord's letters in any order, then Space**, and they are replaced by
+the chord's output. `abt␣` becomes `about ␣` if a+b+t is your chord for about.
+
+- **Your chords, converted.** Chords made of letters keep their keys. A chord
+  with DUP becomes its letters with one doubled (`thh` for t+h+DUP). Chords
+  that use Forge-only keys (the ambidextrous throws, modifiers) get short new
+  letters (`elv` for eleven). Chords whose keys spell the word itself (i+t for
+  it) need nothing: just type the word.
+- **Real words are never replaced.** `bat` stays `bat` even though a+b+t is a
+  chord. The check uses Apple's built-in English vocabulary, every word you
+  have typed at least three times (jargon, names, commands), and common shell
+  and chat tokens (`ls`, `cd`, `pr`, `com`). Only a token typed right after a
+  space, a new line or a cursor move counts, so `gmail.com` is safe.
+- **Backspace right after puts your letters back.** Undo the same letters twice
+  and they stay as typed from then on (see Laptop › Off & blocked).
+- **Punctuation works too:** `bc,` becomes `because,`. Capitals carry over:
+  `Abt` becomes `About`, `ABT` becomes `ABOUT`.
+- **Nothing is delayed.** Keys pass straight through; only the Space after a
+  shorthand is consumed. Shortcuts, key repeat, arrows and games are untouched.
+  The hook runs on its own thread, so a busy app never slows your keyboard.
+- **It gets out of the way:** paused while the Master Forge is connected (you
+  can change that), in password fields, with non-Latin input sources (Arabic),
+  and in any app you pause from the Laptop tab.
+
+The Laptop tab lists every shorthand, most-typed words first, with the
+letters to type, keystrokes saved and a way to change the letters or turn one
+off. With no Forge connected, live coaching points out words you typed in full
+that have a shorthand. Shorthand words appear as their own series in Stats.
+
+Shorthand needs Accessibility access (System Settings › Privacy & Security ›
+Accessibility) to replace text. It replaces the old software chording engine,
+which held every key back and replayed it.
 
 ## Phrase Chords
 
@@ -196,7 +235,9 @@ swift test
 
 Chordsmith Mac stores local app data under macOS Application Support. The advisor runs locally and does not require an AI service or network access for chord generation.
 
-The usage recorder requires macOS Input Monitoring permission. A Master Forge is one logical device made from separately enumerated left (`m4g_s3`) and right (`m4gr_s3`) digitizer halves. Chordsmith recognizes both halves by their USB HID descriptor and correlates each half's key-down with the corresponding macOS keyboard event. Unmatched events are recorded as normal keyboard input; if physical attribution is unavailable, the recorder does not save the word. The Usage tab shows whether one or both Master Forge halves are available for physical attribution.
+The usage recorder requires macOS Input Monitoring permission. Laptop shorthand
+additionally requires Accessibility permission; it keeps only the letters of the
+word being typed in memory and stores daily counts of replacements, never text. A Master Forge is one logical device made from separately enumerated left (`m4g_s3`) and right (`m4gr_s3`) digitizer halves. Chordsmith recognizes both halves by their USB HID descriptor and correlates each half's key-down with the corresponding macOS keyboard event. Unmatched events are recorded as normal keyboard input; if physical attribution is unavailable, the recorder does not save the word. The Usage tab shows whether one or both Master Forge halves are available for physical attribution.
 
 Two- and three-word phrases are stored the same way, as per-day counts only,
 for phrase chords. Phrases seen once and not again within 14 days are deleted.
