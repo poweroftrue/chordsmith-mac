@@ -27,7 +27,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var quickChordPanel: NSPanel?
     private var mainWindow: NSWindow?
     private var nudgeController: NudgePanelController?
-    private var lastStatusItemRescue: Date?
     private let menuBarLogger = Logger(subsystem: "com.poweroftrue.chordsmith", category: "MenuBar")
     private static let statusItemAutosaveName = "ChordsmithStatusItem"
     private var observers: Set<AnyCancellable> = []
@@ -49,6 +48,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         model.openWindowAction = { [weak self] in
             self?.showMainWindow()
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshMenuBarVisibility() }
         }
         let nudgeController = NudgePanelController(model: model)
         self.nudgeController = nudgeController
@@ -104,7 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            self?.rescueStatusItemIfHidden()
+            self?.refreshMenuBarVisibility()
         }
     }
 
@@ -123,55 +129,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    /// Moves the icon to just right of the notch when it has been pushed
-    /// behind it. macOS then hides the leftmost other icon instead. Room is
-    /// left for the widest title ("100%"), and the move is verified and
-    /// retried further right if the icon is still hidden.
-    private func rescueStatusItemIfHidden(attempt: Int = 0) {
-        let frame = statusItem?.button?.window?.frame ?? .zero
-        menuBarLogger.notice("Menu bar icon at x=\(frame.minX, privacy: .public) width=\(frame.width, privacy: .public) hidden=\(self.isStatusItemHidden, privacy: .public)")
-        guard model.keepMenuBarIconVisible, isStatusItemHidden,
-              let screen = statusItem?.button?.window?.screen ?? NSScreen.main,
-              let notchRight = screen.auxiliaryTopRightArea?.minX else { return }
-        if attempt == 0, let lastStatusItemRescue, Date().timeIntervalSince(lastStatusItemRescue) < 600 { return }
-        guard attempt < 4 else { return }
-        lastStatusItemRescue = Date()
-
-        let widestTitle: CGFloat = 90
-        // The preferred position is the distance from the screen's right
-        // edge to the icon's right edge.
-        let position = max(0, screen.frame.maxX - notchRight - widestTitle - 12 - CGFloat(attempt) * 60)
-        if let statusItem {
-            NSStatusBar.system.removeStatusItem(statusItem)
+    /// Reports whether the icon is hidden, so the panel can explain how to
+    /// make room. Chordsmith never moves itself ahead of other apps' icons.
+    private func refreshMenuBarVisibility() {
+        let hidden = isStatusItemHidden
+        if model.isMenuBarIconHidden != hidden {
+            model.isMenuBarIconHidden = hidden
+            menuBarLogger.notice("Menu bar icon hidden behind the notch: \(hidden, privacy: .public)")
         }
-        UserDefaults.standard.set(position, forKey: "NSStatusItem Preferred Position \(Self.statusItemAutosaveName)")
-        menuBarLogger.notice("Moved menu bar icon out from behind the notch to position \(position, privacy: .public)")
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem?.autosaveName = Self.statusItemAutosaveName
-        if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "keyboard.badge.ellipsis", accessibilityDescription: "Chordsmith")
-            button.action = #selector(togglePopover)
-            button.target = self
-        }
-        applyStatusItemTitle()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self, self.isStatusItemHidden else { return }
-            self.rescueStatusItemIfHidden(attempt: attempt + 1)
-        }
-    }
-
-    private func applyStatusItemTitle() {
-        updateStatusItem(
-            usage: model.todayUsage,
-            visible: model.showChordRateInMenuBar,
-            m4gConnected: model.inputObserver.isM4GConnected,
-            checkPlacement: false
-        )
     }
 
     /// Today's chord rate beside the menu bar icon, with the details and the
     /// goal in the tooltip.
-    private func updateStatusItem(usage: TodayUsage, visible: Bool, m4gConnected: Bool, checkPlacement: Bool = true) {
+    private func updateStatusItem(usage: TodayUsage, visible: Bool, m4gConnected: Bool) {
         guard let button = statusItem?.button else { return }
         let pausedNote = "Master Forge not connected: chord hints are paused and typing doesn't count against your chord rate."
         guard visible, let rate = usage.chordRate, usage.words >= 20 else {
@@ -202,10 +172,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         button.toolTip = lines.joined(separator: "\n")
         // A wider title can push the icon behind the notch.
-        if checkPlacement {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-                self?.rescueStatusItemIfHidden()
-            }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.refreshMenuBarVisibility()
         }
         button.setAccessibilityLabel("Chordsmith, \(Int((rate * 100).rounded())) percent chorded today")
     }
@@ -573,6 +541,28 @@ struct RootView: View {
                     .buttonStyle(.borderedProminent)
                 }
                 .font(.caption)
+            }
+
+            if model.isMenuBarIconHidden {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "menubar.rectangle")
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Chordsmith's menu bar icon is hidden behind the camera notch")
+                            .font(.caption.weight(.semibold))
+                        Text("The menu bar is full. Turn off icons you don't need in System Settings › Menu Bar, or hold ⌘ and drag them out. Meanwhile ⌥⇧⌘Space opens this window.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Button("Menu Bar Settings…") {
+                        model.openMenuBarSettings()
+                    }
+                    .controlSize(.small)
+                }
+                .padding(8)
+                .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
             }
 
             if let progress = model.bootstrapProgress {
@@ -1372,8 +1362,6 @@ struct SettingsView: View {
                 }
                 .disabled(!model.coachSettings.enabled)
                 Toggle("Show today's chord rate in the menu bar", isOn: $model.showChordRateInMenuBar)
-                Toggle("Keep the menu bar icon out from behind the camera notch", isOn: $model.keepMenuBarIconVisible)
-                    .help("When the menu bar is full, macOS hides icons behind the notch. Chordsmith moves itself to the right of the notch instead.")
                 Text("Hints appear under the menu bar without taking focus, and fade on their own. They pause automatically while no Master Forge is connected.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1384,9 +1372,7 @@ struct SettingsView: View {
             .onChange(of: model.showChordRateInMenuBar) { _ in
                 Task { await model.saveCoachSettings() }
             }
-            .onChange(of: model.keepMenuBarIconVisible) { _ in
-                Task { await model.saveCoachSettings() }
-            }
+
 
             Section("Engine") {
                 Toggle("Enable software chording", isOn: $model.engineEnabled)
