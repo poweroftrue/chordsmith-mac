@@ -109,18 +109,18 @@ public struct ShorthandTyper: Sendable {
         var isValid = true
     }
 
-    private var token: [Character] = []
-    private var tokenTimes: [TimeInterval] = []
-    /// Whether the token started right after a space, a new line or a
-    /// cursor move, so it is a whole word and not the end of `gmail.com`.
-    private var tokenIsWholeWord = false
-    private var atWordStart = true
-    private var tokenIsTainted = false
+    /// What was typed since the last cursor move, as it now reads on
+    /// screen, so edits and undos keep track of where the word starts.
+    private var line: [Character] = []
+    private var times: [TimeInterval] = []
+    /// Whether the start of `line` is the start of a word (after a click,
+    /// Return, …). False once you backspace past it into unknown text.
+    private var lineStartsWord = true
     private var lastReplacement: Replacement?
     private var press: ChordPress?
     /// Tokens undone in this session, never replaced again until restart.
     private var undoneThisSession: Set<String> = []
-    private var undoneChordSignatures: Set<String> = []
+    private static let maxLine = 256
 
     public private(set) var lastChordAttempt: ChordAttempt?
     public private(set) var chordAttempts = 0
@@ -130,10 +130,63 @@ public struct ShorthandTyper: Sendable {
     public var currentToken: String { String(token) }
 
     public mutating func reset() {
-        clearToken()
-        atWordStart = true
+        line.removeAll(keepingCapacity: true)
+        times.removeAll(keepingCapacity: true)
+        lineStartsWord = true
         lastReplacement = nil
         press = nil
+    }
+
+    // MARK: Line model
+
+    /// Letters, digits and apostrophes at the end of the line.
+    private var tokenStart: Int {
+        var index = line.count
+        while index > 0, ShorthandLetters.isShorthandCharacter(line[index - 1]) { index -= 1 }
+        return index
+    }
+
+    private var token: [Character] { Array(line[tokenStart...]) }
+
+    private static func startsWordAfter(_ character: Character) -> Bool {
+        character.isWhitespace || openers.contains(character)
+    }
+
+    /// Whether the token begins a word, and isn't the end of `gmail.com`.
+    private var tokenIsWholeWord: Bool {
+        let start = tokenStart
+        return start > 0 ? Self.startsWordAfter(line[start - 1]) : lineStartsWord
+    }
+
+    /// Whether a letter typed now would start a word.
+    private var atWordStart: Bool {
+        guard let last = line.last else { return lineStartsWord }
+        return Self.startsWordAfter(last)
+    }
+
+    private mutating func append<S: Sequence>(_ characters: S, at time: TimeInterval) where S.Element == Character {
+        for character in characters {
+            line.append(character)
+            times.append(time)
+        }
+        if line.count > Self.maxLine {
+            line.removeFirst(line.count - Self.maxLine)
+            times.removeFirst(times.count - Self.maxLine)
+            lineStartsWord = false
+        }
+    }
+
+    private mutating func deleteBack(_ count: Int) {
+        let removable = min(count, line.count)
+        line.removeLast(removable)
+        times.removeLast(removable)
+        if count > removable { lineStartsWord = false }
+    }
+
+    private mutating func apply(_ replacement: Replacement) {
+        deleteBack(replacement.deleteCount)
+        // Typed by us: never a burst, never part of a new press.
+        append(replacement.insert, at: -.infinity)
     }
 
     public mutating func handle(
@@ -162,19 +215,7 @@ public struct ShorthandTyper: Sendable {
                 return undo(last)
             }
             lastReplacement = nil
-            if token.isEmpty {
-                // Deleting into text written before: the cursor now sits at
-                // the end of something unknown.
-                atWordStart = false
-                tokenIsWholeWord = false
-            } else {
-                token.removeLast()
-                tokenTimes.removeLast()
-                if token.isEmpty {
-                    atWordStart = tokenIsWholeWord
-                    tokenIsTainted = false
-                }
-            }
+            deleteBack(1)
             return .pass
 
         case .text(let text, let isRepeat, let time, let keyCode):
@@ -188,49 +229,39 @@ public struct ShorthandTyper: Sendable {
                     return .swallow
                 }
                 if Self.punctuationTriggers.contains(character) {
-                    atWordStart = false
-                    return .replace(Replacement(
+                    let edit = Replacement(
                         kind: .edit, deleteCount: 1, insert: "\(character) ", typed: "", output: "",
                         trigger: String(character), chordID: nil, savedKeystrokes: 0
-                    ))
+                    )
+                    apply(edit)
+                    return .replace(edit)
                 }
             }
             lastReplacement = nil
             guard !isRepeat, text.count == 1, let character = text.first else {
-                // Held keys and pasted or injected strings: not a shorthand.
-                if !token.isEmpty || isRepeat { tokenIsTainted = true }
-                if text.count > 1 { clearToken(); atWordStart = false }
+                // Held keys and pasted or injected strings still land on
+                // screen; they just never start a press.
                 press?.isValid = false
+                append(text, at: -.infinity)
                 return .pass
             }
             if ShorthandLetters.isShorthandCharacter(character) {
                 notePress(keyCode, character: character, at: time, startsWord: token.isEmpty && atWordStart)
-                if token.isEmpty {
-                    tokenIsWholeWord = atWordStart
-                    tokenIsTainted = false
-                }
-                token.append(character)
-                tokenTimes.append(time)
-                atWordStart = false
+                append([character], at: time)
                 return .pass
             }
             press?.isValid = false
             let isTrigger = character == " " ||
                 (options.expandOnPunctuation && Self.punctuationTriggers.contains(character))
-            defer {
-                clearToken()
-                atWordStart = character.isWhitespace || Self.openers.contains(character)
-            }
-            guard isTrigger, !token.isEmpty, tokenIsWholeWord, !tokenIsTainted, !isBurst else {
-                return .pass
-            }
             let typed = String(token)
-            guard !undoneThisSession.contains(typed.lowercased()), let found = match(typed) else {
+            guard isTrigger, !typed.isEmpty, tokenIsWholeWord, !isBurst,
+                  !undoneThisSession.contains(typed.lowercased()), let found = match(typed) else {
+                append([character], at: time)
                 return .pass
             }
             let replacement = Replacement(
                 kind: .expand,
-                deleteCount: token.count,
+                deleteCount: typed.count,
                 insert: found.text + String(character),
                 typed: typed,
                 output: found.text,
@@ -238,6 +269,7 @@ public struct ShorthandTyper: Sendable {
                 chordID: found.shorthand.chordID,
                 savedKeystrokes: max(found.text.count - typed.count, 0)
             )
+            apply(replacement)
             lastReplacement = replacement
             return .replace(replacement)
         }
@@ -296,7 +328,7 @@ public struct ShorthandTyper: Sendable {
         }
         // Only presses where every key was down at once are worth a look.
         guard current.isValid, together >= 0 else { return .pass }
-        guard current.startedAsWord, token == current.characters, !tokenIsTainted else {
+        guard current.startedAsWord, token == current.characters, tokenIsWholeWord else {
             attempt(false, "not at a word start")
             return .pass
         }
@@ -308,8 +340,7 @@ public struct ShorthandTyper: Sendable {
             attempt(false, "not held together long enough")
             return .pass
         }
-        let signature = ShorthandLetters.signature(typed)
-        guard !undoneChordSignatures.contains(signature), let found = chordMatch(typed) else {
+        guard let found = chordMatch(typed) else {
             attempt(false, "no chord with these keys")
             return .pass
         }
@@ -324,8 +355,7 @@ public struct ShorthandTyper: Sendable {
             chordID: found.shorthand.chordID,
             savedKeystrokes: max(found.text.count + 1 - typed.count, 0)
         )
-        clearToken()
-        atWordStart = true
+        apply(replacement)
         lastReplacement = replacement
         return .replace(replacement)
     }
@@ -334,20 +364,13 @@ public struct ShorthandTyper: Sendable {
 
     private mutating func undo(_ last: Replacement) -> Action {
         lastReplacement = nil
-        clearToken()
         press = nil
-        let trigger: String
-        if last.kind == .chord {
-            // The space was the chord's, not yours.
-            trigger = ""
-            undoneChordSignatures.insert(ShorthandLetters.signature(last.typed))
-            atWordStart = false
-        } else {
-            trigger = last.trigger
-            undoneThisSession.insert(last.typed.lowercased())
-            atWordStart = last.trigger.first?.isWhitespace ?? false
-        }
-        return .replace(Replacement(
+        // The restored letters stay as typed for this session, whether they
+        // came from Space or from a press.
+        undoneThisSession.insert(last.typed.lowercased())
+        // A chord's space was the chord's, not yours.
+        let trigger = last.kind == .chord ? "" : last.trigger
+        let undo = Replacement(
             kind: .undo,
             deleteCount: last.insert.count,
             insert: last.typed + trigger,
@@ -356,18 +379,15 @@ public struct ShorthandTyper: Sendable {
             trigger: trigger,
             chordID: last.chordID,
             savedKeystrokes: 0
-        ))
-    }
-
-    private mutating func clearToken() {
-        token.removeAll(keepingCapacity: true)
-        tokenTimes.removeAll(keepingCapacity: true)
-        tokenIsWholeWord = false
-        tokenIsTainted = false
+        )
+        apply(undo)
+        return .replace(undo)
     }
 
     private var isBurst: Bool {
-        guard tokenTimes.count >= 3, let first = tokenTimes.first, let last = tokenTimes.last else { return false }
+        let tokenTimes = times[tokenStart...]
+        guard tokenTimes.count >= 3, let first = tokenTimes.first, let last = tokenTimes.last,
+              first.isFinite else { return false }
         return (last - first) / Double(tokenTimes.count - 1) < Self.burstInterval
     }
 }

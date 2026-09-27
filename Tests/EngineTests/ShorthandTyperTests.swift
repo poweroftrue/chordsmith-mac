@@ -324,4 +324,36 @@ final class MashedChordTests: XCTestCase {
         var off = ShorthandTyper()
         XCTAssertEqual(mash("abt", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &off, mash: false), .pass)
     }
+
+    func testAfterUndoingAndDeletingTheLettersYouCanChordAgain() {
+        var typer = ShorthandTyper()
+        mash("abt", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &typer)
+        _ = send(.backspace(isRepeat: false), &typer)          // undo: `abt` is back
+        for _ in 0..<3 { _ = send(.backspace(isRepeat: false), &typer) }  // delete it
+        guard case .replace(let chord) = mash("abt", down: [1, 1.01, 1.02], up: [1.1, 1.1, 1.11], &typer) else {
+            return XCTFail("back at the start of the word, so the chord works again")
+        }
+        XCTAssertEqual(chord.insert, "about ")
+    }
+
+    func testChordsBackToBack() {
+        var typer = ShorthandTyper()
+        mash("abt", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &typer)
+        guard case .replace = mash("on", down: [0.2, 0.205], up: [0.3, 0.31], &typer) else {
+            return XCTFail("the chord's space starts the next word")
+        }
+    }
+
+    func testDeletingBackToASpaceIsAWordStartAgain() {
+        var typer = ShorthandTyper()
+        for (index, character) in "hi xy".enumerated() {
+            _ = send(.text(String(character), isRepeat: false, at: Double(index) * 0.1, keyCode: 7), &typer)
+            _ = send(.keyUp(keyCode: 7, at: Double(index) * 0.1 + 0.05), &typer)
+        }
+        _ = send(.backspace(isRepeat: false), &typer)
+        _ = send(.backspace(isRepeat: false), &typer)
+        guard case .replace = mash("abt", down: [1, 1.01, 1.02], up: [1.1, 1.1, 1.11], &typer) else {
+            return XCTFail("the cursor is after `hi `")
+        }
+    }
 }
