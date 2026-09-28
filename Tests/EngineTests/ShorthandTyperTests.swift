@@ -7,7 +7,7 @@ final class ShorthandTyperTests: XCTestCase {
     private let matcher: ShorthandMatcher = {
         let chords = [
             ChordEntry(inputKeys: ["a", "b", "t"], output: "about", profile: .cc2A1, deploymentTarget: .device, source: "test"),
-            ChordEntry(inputKeys: ["c", "b"], output: "because", profile: .cc2A1, deploymentTarget: .device, source: "test")
+            ChordEntry(inputKeys: ["c", "b", "s"], output: "because", profile: .cc2A1, deploymentTarget: .device, source: "test")
         ]
         let words: Set<String> = ["bat", "tab", "hi", "com"]
         return ShorthandMatcher(catalog: ShorthandBuilder.build(chords: chords, realWords: words), realWords: words)
@@ -89,10 +89,10 @@ final class ShorthandTyperTests: XCTestCase {
 
     func testPunctuationTriggersAndKeepsThePunctuation() {
         var typer = ShorthandTyper()
-        guard case .replace(let replacement) = type("bc,", into: &typer) else { return XCTFail("expected a replacement") }
+        guard case .replace(let replacement) = type("bcs,", into: &typer) else { return XCTFail("expected a replacement") }
         XCTAssertEqual(replacement.insert, "because,")
         var other = ShorthandTyper()
-        XCTAssertEqual(type("bc,", into: &other, options: .init(expandOnPunctuation: false)), .pass)
+        XCTAssertEqual(type("bcs,", into: &other, options: .init(expandOnPunctuation: false)), .pass)
     }
 
     func testMachineSpeedTypingIsIgnored() {

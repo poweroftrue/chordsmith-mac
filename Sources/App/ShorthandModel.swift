@@ -38,7 +38,7 @@ enum ShorthandStatus: Equatable {
         case .pausedInApp:
             return "You paused shorthands in this app. Everywhere else they work as usual."
         case .active:
-            return "Press a chord's keys together, or type its letters in any order then Space. Backspace straight after puts your letters back."
+            return "Press a chord's keys together, or type its three letters then Space. Backspace straight after puts your letters back."
         case .failed:
             return "The keyboard hook couldn't start. Quit and reopen Chordsmith, or check Accessibility access."
         }
@@ -253,8 +253,8 @@ extension AppModel {
     func shorthandLettersProblem(_ letters: String, for chordID: UUID) -> String? {
         let cleaned = letters.lowercased().filter(ShorthandLetters.isShorthandCharacter)
         guard cleaned.count == letters.count else { return "Use letters, digits and ' only." }
-        guard cleaned.count >= 2 else { return "Use at least two letters." }
-        if let other = shorthandCatalog.bySignature[ShorthandLetters.signature(cleaned)], other.chordID != chordID {
+        guard cleaned.count >= 3 else { return "Use at least three letters: two go off by accident." }
+        if let other = shorthandCatalog.byToken[cleaned], other.chordID != chordID {
             return "These letters already give “\(other.output)”."
         }
         if shorthandMatcher.isRealWord(cleaned) {

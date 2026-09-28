@@ -10,8 +10,8 @@ struct LaptopTabView: View {
     @State private var editing: LaptopShorthand?
 
     enum Filter: String, CaseIterable, Identifiable {
-        case ready = "Ready"
-        case invented = "New letters"
+        case ready = "Type"
+        case invented = "Press"
         case notNeeded = "Not needed"
         case blocked = "Off & blocked"
         var id: String { rawValue }
@@ -134,7 +134,7 @@ struct LaptopTabView: View {
                 ? "Sync your Master Forge chords first, then they show up here as shorthands."
                 : "No shorthand matches your search.")
         case .invented:
-            shorthandList(inventedItems, empty: "Every chord could keep its own keys.")
+            shorthandList(inventedItems, empty: "No short words to press together.")
         case .notNeeded:
             notNeededList
         case .blocked:
@@ -143,11 +143,11 @@ struct LaptopTabView: View {
     }
 
     private var readyItems: [LaptopShorthand] {
-        sorted(model.shorthandCatalog.shorthands.filter { $0.kind != .newShortcut && matchesSearch($0.output, $0.letters) })
+        sorted(model.shorthandCatalog.shorthands.filter { $0.kind != .pressTogether && matchesSearch($0.output, $0.letters) })
     }
 
     private var inventedItems: [LaptopShorthand] {
-        sorted(model.shorthandCatalog.shorthands.filter { $0.kind == .newShortcut && matchesSearch($0.output, $0.letters) })
+        sorted(model.shorthandCatalog.shorthands.filter { $0.kind == .pressTogether && matchesSearch($0.output, $0.pressKeys ?? $0.letters) })
     }
 
     /// Most-written words first: those are the shorthands worth learning.
@@ -283,7 +283,7 @@ struct ShorthandRow: View {
                     Text(shorthand.output)
                         .font(.body.weight(.medium))
                         .lineLimit(1)
-                    if shorthand.kind != .sameKeys {
+                    if shorthand.kind == .custom {
                         PanelBadge(text: shorthand.kind.displayName, tint: badgeTint)
                     }
                 }
@@ -430,7 +430,7 @@ private struct ShorthandEditor: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Letters for “\(shorthand.output)”")
                 .font(.headline)
-            Text("Any order of these letters, then Space, types the word. Pick letters that aren't a word you'd type on their own.")
+            Text("Type these letters in this order, then Space. Use at least three, and pick ones that aren't a word you'd type on their own.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

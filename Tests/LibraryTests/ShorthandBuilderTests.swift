@@ -17,13 +17,12 @@ final class ShorthandBuilderTests: XCTestCase {
         XCTAssertEqual(shorthand.savedKeystrokes, 2)
     }
 
-    func testAnyOrderMatchesButRealWordsNeverDo() {
+    func testOnlyTheLettersInTheirOrderMatch() {
         let catalog = ShorthandBuilder.build(chords: [chord(["a", "b", "t"], "about")], realWords: words)
         let matcher = ShorthandMatcher(catalog: catalog, realWords: words)
         XCTAssertEqual(matcher.match("abt")?.text, "about")
-        XCTAssertEqual(matcher.match("tba")?.text, "about")
-        XCTAssertNil(matcher.match("bat"), "bat is a word")
-        XCTAssertNil(matcher.match("tab"), "tab is a word")
+        XCTAssertNil(matcher.match("tba"), "another order is another token")
+        XCTAssertNil(matcher.match("bat"))
         XCTAssertNil(matcher.match("ab"))
         XCTAssertNil(matcher.match("abtt"))
     }
@@ -35,45 +34,62 @@ final class ShorthandBuilderTests: XCTestCase {
         XCTAssertEqual(matcher.match("ABT")?.text, "ABOUT")
     }
 
-    func testChordsThatSpellTheWordOrSaveNothingAreSkipped() {
+    func testWordsGetThreeOfTheirLettersEvenWhenTheChordHasTwo() throws {
+        let catalog = ShorthandBuilder.build(chords: [chord(["w", "i"], "write"), chord(["AMBILEFT", "s"], "please")], realWords: words)
+        let byWord = Dictionary(uniqueKeysWithValues: catalog.shorthands.map { ($0.word, $0) })
+        XCTAssertEqual(byWord["write"]?.letters, "wrt")
+        XCTAssertEqual(byWord["write"]?.kind, .newShortcut)
+        XCTAssertEqual(byWord["please"]?.letters, "pls")
+        XCTAssertTrue(catalog.shorthands.allSatisfy { $0.kind == .pressTogether || $0.letters.count >= 3 })
+    }
+
+    func testShortWordsArePressedTogetherOnly() throws {
+        // Typing three letters for a four-letter word saves one key: not worth it.
+        let catalog = ShorthandBuilder.build(chords: [chord(["h", "v"], "have"), chord(["e", "t"], "the")], realWords: words)
+        let matcher = ShorthandMatcher(catalog: catalog, realWords: words)
+        XCTAssertTrue(catalog.shorthands.allSatisfy { $0.kind == .pressTogether && $0.tokens.isEmpty })
+        XCTAssertNil(matcher.match("hv"))
+        XCTAssertEqual(matcher.matchChord("vh")?.text, "have")
+        XCTAssertEqual(matcher.matchChord("te")?.text, "the")
+    }
+
+    func testChordsThatSpellTheWordOrAreNotTextAreSkipped() {
         let catalog = ShorthandBuilder.build(
-            chords: [chord(["i", "t"], "it"), chord(["a", "e"], "at"), chord(["a", "LEFT_ALT"], "<LEFT_GUI>", flags: [.macro])],
+            chords: [chord(["i", "t"], "it"), chord(["a", "LEFT_ALT"], "<LEFT_GUI>", flags: [.macro])],
             realWords: words
         )
         XCTAssertTrue(catalog.shorthands.isEmpty)
-        XCTAssertEqual(Set(catalog.skipped.map(\.reason)), [.typeTheWord, .noSavings, .notText])
+        XCTAssertEqual(Set(catalog.skipped.map(\.reason)), [.typeTheWord, .notText])
     }
 
-    func testDupBecomesADoubledLetter() throws {
-        let catalog = ShorthandBuilder.build(chords: [chord(["t", "h", "DUP"], "that"), chord(["s", "e", "DUP"], "see")], realWords: words)
-        let that = try XCTUnwrap(catalog.shorthands.first { $0.word == "that" })
-        XCTAssertEqual(that.kind, .doubledLetter)
-        XCTAssertEqual(that.letters, "thh")
-        let matcher = ShorthandMatcher(catalog: catalog, realWords: words)
-        XCTAssertEqual(matcher.match("tth")?.text, "that")
-        XCTAssertNil(matcher.match("th"), "without the doubled letter it's a different chord")
-        XCTAssertEqual(catalog.skipped.first { $0.output == "see" }?.reason, .typeTheWord)
+    func testTheChordsOwnLettersWinWhenTheyReadWell() throws {
+        let catalog = ShorthandBuilder.build(chords: [chord(["p", "d", "r"], "production")], realWords: words)
+        let shorthand = try XCTUnwrap(catalog.shorthands.first)
+        XCTAssertEqual(shorthand.letters, "prd")
+        XCTAssertEqual(shorthand.kind, .sameKeys)
     }
 
-    func testForgeOnlyKeysGetNewLetters() {
+    func testForgeOnlyKeysGetLettersToo() {
         let catalog = ShorthandBuilder.build(
             chords: [chord(["v", "AMBILEFT"], "eleven"), chord(["p", "AMBIRIGHT"], "eleventh")],
-            realWords: words
+            realWords: words,
+            usage: ["eleven": 10, "eleventh": 2]
         )
         let byWord = Dictionary(uniqueKeysWithValues: catalog.shorthands.map { ($0.word, $0) })
-        XCTAssertEqual(byWord["eleven"]?.letters, "elv")
-        XCTAssertEqual(byWord["eleven"]?.kind, .newShortcut)
-        XCTAssertEqual(byWord["eleventh"]?.letters, "elvn", "the shorter word gets the shorter letters")
+        XCTAssertEqual(byWord["eleven"]?.letters, "elv", "the word you write more picks first")
+        XCTAssertEqual(byWord["eleventh"]?.letters.count, 3)
+        XCTAssertNotEqual(byWord["eleventh"]?.letters, "elv")
     }
 
-    func testWhenTheWordOrderIsARealWordAnotherOrderIsSuggested() throws {
-        let catalog = ShorthandBuilder.build(chords: [chord(["h", "o", "w"], "however")], realWords: words)
-        let shorthand = try XCTUnwrap(catalog.shorthands.first)
-        XCTAssertEqual(shorthand.letters, "hwo")
-        let matcher = ShorthandMatcher(catalog: catalog, realWords: words)
-        XCTAssertNil(matcher.match("how"))
-        XCTAssertNil(matcher.match("who"))
-        XCTAssertEqual(matcher.match("hwo")?.text, "however")
+    func testRealWordsAndCommonTokensAreNeverPicked() throws {
+        let real = words.union(ShorthandLetters.commonTokens).union(["wrt"])
+        let catalog = ShorthandBuilder.build(chords: [chord(["w", "i"], "write"), chord(["s", "c"], "source")], realWords: real)
+        let byWord = Dictionary(uniqueKeysWithValues: catalog.shorthands.map { ($0.word, $0) })
+        let write = try XCTUnwrap(byWord["write"]?.letters)
+        let source = try XCTUnwrap(byWord["source"]?.letters)
+        XCTAssertNotEqual(write, "wrt")
+        XCTAssertNotEqual(source, "src", "src is typed for real")
+        XCTAssertEqual(write.first, "w")
     }
 
     func testYourLettersWinAndCanBeTurnedOff() throws {
@@ -90,18 +106,26 @@ final class ShorthandBuilderTests: XCTestCase {
     }
 
     func testBlockedAndAllowedTokens() {
-        let catalog = ShorthandBuilder.build(chords: [chord(["a", "b", "t"], "about"), chord(["h", "o", "w"], "however")], realWords: words)
+        let about = chord(["a", "b", "t"], "about")
+        let however = chord(["h", "o", "w"], "however")
+        let catalog = ShorthandBuilder.build(
+            chords: [about, however], realWords: words,
+            overrides: [however.id: ShorthandOverride(chordID: however.id, letters: "how")]
+        )
+        XCTAssertNil(ShorthandMatcher(catalog: catalog, realWords: words).match("how"), "how is a word")
         let matcher = ShorthandMatcher(catalog: catalog, realWords: words, blocked: ["abt"], allowed: ["how"])
         XCTAssertNil(matcher.match("abt"))
-        XCTAssertEqual(matcher.match("tba")?.text, "about", "only the order you undid is blocked")
         XCTAssertEqual(matcher.match("how")?.text, "however")
     }
 
-    func testCommonShellAndChatTokensAreRealWords() {
-        let catalog = ShorthandBuilder.build(chords: [chord(["l", "s"], "list")], realWords: ShorthandLetters.commonTokens)
-        let matcher = ShorthandMatcher(catalog: catalog, realWords: ShorthandLetters.commonTokens)
-        XCTAssertNil(matcher.match("ls"))
-        XCTAssertEqual(matcher.match("sl")?.text, "list")
+    func testQuickLettersBeatSlowOnes() throws {
+        let alternating = try XCTUnwrap(LaptopErgonomics.typingCost("fnc"))
+        let oneFingerJump = try XCTUnwrap(LaptopErgonomics.typingCost("rvw"))
+        let roll = try XCTUnwrap(LaptopErgonomics.typingCost("wer"))
+        let changeOfDirection = try XCTUnwrap(LaptopErgonomics.typingCost("wre"))
+        XCTAssertLessThan(alternating, oneFingerJump)
+        XCTAssertLessThan(roll, changeOfDirection)
+        XCTAssertNil(LaptopErgonomics.typingCost("a1"))
     }
 
     func testUndoingTwiceBlocksAToken() async throws {

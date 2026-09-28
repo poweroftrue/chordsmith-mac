@@ -78,4 +78,44 @@ public enum LaptopErgonomics {
         guard let cost = cost(characters) else { return false }
         return cost <= limit(keys: characters.count)
     }
+
+    /// Effort to type these keys one after another at speed; nil when a key
+    /// isn't a letter key. Switching hands and rolling across fingers of
+    /// one hand are quick. One finger hitting two different keys in a row
+    /// is slow, and slower still when it jumps a row (`ce`, `ju`).
+    public static func typingCost<S: Sequence>(_ characters: S) -> Double? where S.Element == Character {
+        let found = characters.map { keys[Character($0.lowercased())] }
+        guard !found.isEmpty, !found.contains(where: { $0 == nil }) else { return nil }
+        let typed = found.compactMap { $0 }
+        var cost = 0.0
+        for key in typed {
+            cost += key.row == 1 ? 0 : (key.row == 0 ? 0.2 : 0.35)
+            if key.finger == 0 { cost += 0.35 }
+            if key.column == 4 || key.column == 5 { cost += 0.15 }
+        }
+        for (first, second) in zip(typed, typed.dropFirst()) where first.hand == second.hand {
+            let rows = Double(abs(first.row - second.row))
+            if first.column == second.column && first.row == second.row {
+                cost += 0.4
+            } else if first.finger == second.finger {
+                cost += 0.8 + rows * 0.6
+            } else {
+                // A roll: inward (toward the index finger) flows best.
+                cost += 0.15 + (second.finger < first.finger ? 0.15 : 0) + (rows == 2 ? 0.5 : 0)
+            }
+        }
+        for index in typed.indices.dropFirst(2) {
+            let (first, middle, last) = (typed[index - 2], typed[index - 1], typed[index])
+            if first.hand == middle.hand, middle.hand == last.hand,
+               (middle.finger - first.finger).signum() * (last.finger - middle.finger).signum() < 0 {
+                // Changing direction within one hand (`sfd`).
+                cost += 0.4
+            } else if first.hand == last.hand, first.hand != middle.hand, first.finger == last.finger,
+                      first.column != last.column || first.row != last.row {
+                // One finger twice around a key from the other hand.
+                cost += 0.3
+            }
+        }
+        return cost
+    }
 }

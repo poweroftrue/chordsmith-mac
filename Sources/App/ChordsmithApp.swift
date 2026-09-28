@@ -1402,7 +1402,7 @@ struct SettingsView: View {
                     Toggle("Backspace right after puts my letters back", isOn: $model.shorthandSettings.undoWithBackspace)
                 }
                 .disabled(!model.shorthandSettings.enabled)
-                Text("Type a chord's letters in any order, then Space: abt → about. Real words are never replaced. Keys are never delayed; only the Space after a shorthand is used.")
+                Text("Type three letters of a word, then Space: wrt → write. Short words are pressed together instead. Real words are never replaced. Keys are never delayed; only the Space after a shorthand is used.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

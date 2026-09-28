@@ -84,15 +84,15 @@ final class CoachEngineTests: XCTestCase {
     func testLaptopWordsGetAShorthandHintOnlyWhenShorthandIsOn() {
         var engine = CoachEngine()
         let start = Date()
-        let shorthand = LaptopShorthand(chordID: UUID(), output: "because", chordKeys: ["b", "c"], letters: "bc", kind: .sameKeys, signatures: ["bc"])
+        let shorthand = LaptopShorthand(chordID: UUID(), output: "because", chordKeys: ["b", "c"], letters: "bcs", kind: .sameKeys, tokens: ["bcs"])
         let away = word("because", .keyboardAway)
 
         XCTAssertNil(engine.nudge(for: away, handCountToday: 2, snapshot: snapshot, suggestions: [:], settings: CoachSettings(),
                                   shorthands: ["because": shorthand], shorthandActive: false, now: start))
         let hint = engine.nudge(for: away, handCountToday: 2, snapshot: snapshot, suggestions: [:], settings: CoachSettings(),
                                 shorthands: ["because": shorthand], shorthandActive: true, now: start)
-        XCTAssertEqual(hint?.kind, .shorthand(letters: "bc"))
-        XCTAssertEqual(hint?.input, ["b", "c", "space"])
+        XCTAssertEqual(hint?.kind, .shorthand(letters: "bcs"))
+        XCTAssertEqual(hint?.input, ["b", "c", "s", "space"])
         // Words with no shorthand never nudge while the Forge is away.
         XCTAssertNil(engine.nudge(for: word("exit", .keyboardAway), handCountToday: 5, snapshot: snapshot, suggestions: [:], settings: CoachSettings(),
                                   shorthands: ["because": shorthand], shorthandActive: true, now: start.addingTimeInterval(100)))

@@ -6,30 +6,30 @@ import NaturalLanguage
 // A laptop keyboard can't press four or five letter keys at once reliably
 // (MacBook keyboards ghost at three), and holding keys back to detect chords
 // makes every keystroke lag. So on the laptop a chord becomes a shorthand:
-// type the chord's letters in any order, then Space or punctuation, and the
-// letters are replaced by the chord's output. Keys are never delayed; only
-// the trigger key is consumed when a shorthand matches.
+// type three letters, then Space or punctuation, and they are replaced by the
+// chord's output (`wrt` → write). Short words keep only the press-together
+// chord. Keys are never delayed; only the trigger key is consumed when a
+// shorthand matches.
 
 /// How a Master Forge chord was turned into something a laptop can type.
 public enum ShorthandKind: String, Codable, Sendable {
-    /// The chord's own letters, in any order.
+    /// Three of the word's letters that happen to be the chord's own keys.
     case sameKeys
-    /// The chord uses the M4G's DUP key: its letters with one of them doubled.
+    /// Kept so saved values still decode; no longer produced.
     case doubledLetter
-    /// The chord's keys don't exist on a laptop (or every order of them is a
-    /// real word), so a short, unused abbreviation was picked instead.
+    /// Three of the word's letters, picked to be quick to type.
     case newShortcut
     /// Letters you chose yourself.
     case custom
-    /// Every order of the keys is a real word, so only pressing them
-    /// together works.
+    /// A short word: typing three letters wouldn't save anything, so only
+    /// pressing the keys together works.
     case pressTogether
 
     public var displayName: String {
         switch self {
-        case .sameKeys: return "Same keys"
+        case .sameKeys: return "Chord's keys"
         case .doubledLetter: return "DUP → double letter"
-        case .newShortcut: return "New shortcut"
+        case .newShortcut: return "Word's letters"
         case .custom: return "Your shortcut"
         case .pressTogether: return "Press together only"
         }
@@ -44,7 +44,7 @@ public enum ShorthandSkipReason: String, Codable, Sendable {
     case noSavings
     /// A macro, shortcut or other non-text output.
     case notText
-    /// Another shorthand already uses these letters.
+    /// Every quick set of letters is taken or spells a word.
     case conflict
     /// You turned it off.
     case disabled
@@ -57,7 +57,7 @@ public enum ShorthandSkipReason: String, Codable, Sendable {
         case .typeTheWord: return "Its keys spell the word, so just type it"
         case .noSavings: return "No keys saved"
         case .notText: return "Macro or shortcut, not text"
-        case .conflict: return "Another shorthand uses these letters"
+        case .conflict: return "Every quick set of letters is taken"
         case .disabled: return "Turned off"
         case .awkwardOnLaptop: return "Keys share a finger on a laptop"
         }
@@ -73,12 +73,11 @@ public struct LaptopShorthand: Identifiable, Hashable, Sendable {
     public let word: String
     /// The chord's keys on the Master Forge, for reference.
     public let chordKeys: [String]
-    /// The suggested order to type, e.g. `abt` for about. Any order of the
-    /// same letters works unless it spells a real word.
+    /// The letters to type, in this order: `wrt` for write.
     public let letters: String
     public let kind: ShorthandKind
-    /// Sorted letter multisets that trigger this shorthand.
-    public let signatures: [String]
+    /// Typed tokens that trigger this shorthand, lowercased.
+    public let tokens: [String]
     /// The keys to press together on the laptop, in word order: the
     /// chord's own keys, or comfortable ones when those share a finger.
     public let pressKeys: String?
@@ -93,7 +92,7 @@ public struct LaptopShorthand: Identifiable, Hashable, Sendable {
         chordKeys: [String],
         letters: String,
         kind: ShorthandKind,
-        signatures: [String],
+        tokens: [String],
         chordSignature: String? = nil,
         pressKeys: String? = nil,
         pressAdjusted: Bool = false
@@ -104,7 +103,7 @@ public struct LaptopShorthand: Identifiable, Hashable, Sendable {
         self.chordKeys = chordKeys
         self.letters = letters
         self.kind = kind
-        self.signatures = signatures
+        self.tokens = tokens
         self.pressKeys = pressKeys ?? chordSignature.map {
             ShorthandBuilder.wordOrder(Array($0), word: output.lowercased()).map(String.init).joined()
         }
@@ -114,7 +113,7 @@ public struct LaptopShorthand: Identifiable, Hashable, Sendable {
     func withPressKeys(_ keys: String?, adjusted: Bool) -> LaptopShorthand {
         LaptopShorthand(
             chordID: chordID, output: output, chordKeys: chordKeys, letters: letters, kind: kind,
-            signatures: signatures, pressKeys: keys, pressAdjusted: adjusted
+            tokens: tokens, pressKeys: keys, pressAdjusted: adjusted
         )
     }
 
@@ -153,22 +152,28 @@ public struct ShorthandOverride: Hashable, Codable, Sendable {
 public struct ShorthandCatalog: Sendable {
     public let shorthands: [LaptopShorthand]
     public let skipped: [SkippedShorthand]
-    public let bySignature: [String: LaptopShorthand]
+    public let byToken: [String: LaptopShorthand]
     /// Chords by their own keys, for pressing them together.
     public let byChordSignature: [String: LaptopShorthand]
+    /// Typed letters by signature, for pressing them together instead.
+    let byTokenSignature: [String: LaptopShorthand]
 
     public static let empty = ShorthandCatalog(shorthands: [], skipped: [])
 
     public init(shorthands: [LaptopShorthand], skipped: [SkippedShorthand]) {
         self.shorthands = shorthands
         self.skipped = skipped
-        var bySignature: [String: LaptopShorthand] = [:]
+        var byToken: [String: LaptopShorthand] = [:]
+        var byTokenSignature: [String: LaptopShorthand] = [:]
         for shorthand in shorthands {
-            for signature in shorthand.signatures where bySignature[signature] == nil {
-                bySignature[signature] = shorthand
+            for token in shorthand.tokens where byToken[token] == nil {
+                byToken[token] = shorthand
+                let signature = ShorthandLetters.signature(token)
+                if byTokenSignature[signature] == nil { byTokenSignature[signature] = shorthand }
             }
         }
-        self.bySignature = bySignature
+        self.byToken = byToken
+        self.byTokenSignature = byTokenSignature
         var byChordSignature: [String: LaptopShorthand] = [:]
         for shorthand in shorthands {
             if let signature = shorthand.chordSignature, byChordSignature[signature] == nil {
@@ -217,7 +222,7 @@ public struct ShorthandMatcher: Sendable {
         self.allowed = allowed
     }
 
-    public var isEmpty: Bool { catalog.bySignature.isEmpty }
+    public var isEmpty: Bool { catalog.byToken.isEmpty && catalog.byChordSignature.isEmpty }
 
     public func match(_ token: String) -> ShorthandMatch? {
         let lower = token.lowercased()
@@ -227,7 +232,7 @@ public struct ShorthandMatcher: Sendable {
         if !allowed.contains(lower) {
             guard !realWords.contains(lower), !blocked.contains(lower) else { return nil }
         }
-        guard let shorthand = catalog.bySignature[ShorthandLetters.signature(lower)],
+        guard let shorthand = catalog.byToken[lower],
               lower != shorthand.word else { return nil }
         return ShorthandMatch(shorthand: shorthand, text: ShorthandLetters.applyCase(of: token, to: shorthand.output))
     }
@@ -238,7 +243,7 @@ public struct ShorthandMatcher: Sendable {
         let lower = keys.lowercased()
         let signature = ShorthandLetters.signature(lower)
         guard lower.count >= 2, lower.allSatisfy(ShorthandLetters.isShorthandCharacter),
-              let shorthand = catalog.byChordSignature[signature] ?? catalog.bySignature[signature],
+              let shorthand = catalog.byChordSignature[signature] ?? catalog.byTokenSignature[signature],
               lower != shorthand.word else { return nil }
         return ShorthandMatch(shorthand: shorthand, text: ShorthandLetters.applyCase(of: keys, to: shorthand.output))
     }
@@ -356,29 +361,28 @@ public enum ShorthandLetters {
 // MARK: - Building
 
 public enum ShorthandBuilder {
+    /// A typed shorthand must save at least this many keystrokes; below
+    /// that, the word itself is as quick and needs no thought.
+    static let minimumSavings = 2
+
     /// Turns device chords into laptop shorthands.
     /// - Parameters:
     ///   - realWords: words that must never be replaced (dictionary, words
     ///     you type, `ShorthandLetters.commonTokens`).
     ///   - overrides: your own letters, or shorthands you turned off.
+    ///   - usage: how often you write each word; frequent words pick first.
     public static func build(
         chords: [ChordEntry],
         realWords: Set<String>,
         overrides: [UUID: ShorthandOverride] = [:],
         usage: [String: Int] = [:]
     ) -> ShorthandCatalog {
-        struct Pending {
-            let chord: ChordEntry
-            let output: String
-            var chordSignature: String?
-        }
-
         var skipped: [SkippedShorthand] = []
-        var usedSignatures: Set<String> = []
+        var used: Set<String> = []
         var shorthands: [LaptopShorthand] = []
-        var needsNewShortcut: [Pending] = []
-        var customs: [(Pending, String)] = []
-        var direct: [Pending] = []
+        var customs: [(ChordEntry, String, String)] = []
+        var byWord: [String: [(chord: ChordEntry, output: String)]] = [:]
+        var wordOrderSeen: [String] = []
 
         for chord in chords where chord.enabled {
             let keys = chord.inputKeys
@@ -386,124 +390,75 @@ public enum ShorthandBuilder {
                 skipped.append(SkippedShorthand(chordID: chord.id, output: chord.output, chordKeys: keys, reason: .notText))
                 continue
             }
-            let pending = Pending(chord: chord, output: output)
             if let override = overrides[chord.id] {
                 if override.disabled {
                     skipped.append(SkippedShorthand(chordID: chord.id, output: output, chordKeys: keys, reason: .disabled))
                     continue
                 }
                 if let letters = override.letters.map(normalizedLetters), letters.count >= 2 {
-                    customs.append((pending, letters))
+                    customs.append((chord, output, letters))
                     continue
                 }
             }
-            direct.append(pending)
+            let word = output.lowercased()
+            if byWord[word] == nil { wordOrderSeen.append(word) }
+            byWord[word, default: []].append((chord, output))
         }
 
         // Your own letters come first so they win any conflict.
-        for (pending, letters) in customs {
-            let signature = ShorthandLetters.signature(letters)
-            guard !usedSignatures.contains(signature) else {
-                skipped.append(SkippedShorthand(chordID: pending.chord.id, output: pending.output, chordKeys: pending.chord.inputKeys, reason: .conflict))
+        var customWords: Set<String> = []
+        for (chord, output, letters) in customs {
+            guard !used.contains(letters) else {
+                skipped.append(SkippedShorthand(chordID: chord.id, output: output, chordKeys: chord.inputKeys, reason: .conflict))
                 continue
             }
-            usedSignatures.insert(signature)
+            used.insert(letters)
+            customWords.insert(output.lowercased())
             shorthands.append(LaptopShorthand(
-                chordID: pending.chord.id,
-                output: pending.output,
-                chordKeys: pending.chord.inputKeys,
-                letters: letters,
-                kind: .custom,
-                signatures: [signature],
-                chordSignature: chordKeySignature(pending.chord)
+                chordID: chord.id, output: output, chordKeys: chord.inputKeys, letters: letters,
+                kind: .custom, tokens: [letters], chordSignature: chordKeySignature(chord)
             ))
         }
 
-        for pending in direct {
-            let keys = pending.chord.inputKeys.map { $0.lowercased() }
-            let word = pending.output.lowercased()
-            let letterKeys = keys.filter { $0.count == 1 && $0.allSatisfy(ShorthandLetters.isShorthandCharacter) }
-            let hasDup = keys.contains("dup")
-            let otherKeys = keys.count - letterKeys.count - (hasDup ? 1 : 0)
-            guard otherKeys == 0, !letterKeys.isEmpty, !(hasDup && letterKeys.count < 1) else {
-                needsNewShortcut.append(pending)
-                continue
-            }
-            let base = letterKeys.map { Character($0) }
+        // Words you write most pick their letters first.
+        let words = wordOrderSeen.enumerated().sorted { lhs, rhs in
+            let left = usage[lhs.element] ?? 0, right = usage[rhs.element] ?? 0
+            if left != right { return left > right }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
 
-            // Each variant is one way to type the chord: its letters, or with
-            // DUP, its letters with one of them doubled.
-            let variants: [[Character]] = hasDup ? base.map { base + [$0] } : [base]
-            let signatures = variants.map { ShorthandLetters.signature($0) }
-            if signatures.contains(ShorthandLetters.signature(word)) {
-                skipped.append(SkippedShorthand(chordID: pending.chord.id, output: pending.output, chordKeys: pending.chord.inputKeys, reason: .typeTheWord))
-                continue
+        for word in words {
+            let entries = byWord[word] ?? []
+            // Chords whose keys just spell the word add nothing.
+            let useful = entries.filter { entry in
+                let keys = entry.chord.inputKeys.map { $0.lowercased() }
+                return !(keys.allSatisfy { $0.count == 1 } && ShorthandLetters.signature(keys.joined()) == ShorthandLetters.signature(word))
             }
-            guard variants[0].count < pending.output.count else {
-                skipped.append(SkippedShorthand(chordID: pending.chord.id, output: pending.output, chordKeys: pending.chord.inputKeys, reason: .noSavings))
-                continue
+            for entry in entries where !useful.contains(where: { $0.chord.id == entry.chord.id }) {
+                skipped.append(SkippedShorthand(chordID: entry.chord.id, output: entry.output, chordKeys: entry.chord.inputKeys, reason: .typeTheWord))
             }
-            let free = signatures.filter { !usedSignatures.contains($0) }
-            guard !free.isEmpty else {
-                skipped.append(SkippedShorthand(chordID: pending.chord.id, output: pending.output, chordKeys: pending.chord.inputKeys, reason: .conflict))
-                continue
-            }
-            let ordered: String?
-            if hasDup {
-                ordered = doubledOrder(base: base, word: word, realWords: realWords)
-            } else {
-                ordered = typingOrder(base, word: word, realWords: realWords)
-            }
-            guard let letters = ordered else {
-                // Every order spells a real word: pick new letters to type,
-                // while pressing the keys together still works.
-                var blocked = pending
-                blocked.chordSignature = hasDup ? nil : signatures[0]
-                needsNewShortcut.append(blocked)
-                continue
-            }
-            usedSignatures.formUnion(free)
-            shorthands.append(LaptopShorthand(
-                chordID: pending.chord.id,
-                output: pending.output,
-                chordKeys: pending.chord.inputKeys,
-                letters: letters,
-                kind: hasDup ? .doubledLetter : .sameKeys,
-                signatures: free,
-                chordSignature: hasDup ? nil : signatures[0]
-            ))
-        }
+            guard let first = useful.first else { continue }
 
-        // Words that already have a shorthand don't need a second, invented one.
-        let coveredWords = Set(shorthands.map(\.word))
-        for pending in needsNewShortcut.sorted(by: { $0.output.count < $1.output.count }) {
-            let word = pending.output.lowercased()
-            if coveredWords.contains(word) {
-                if let chordSignature = pending.chordSignature {
-                    shorthands.append(pressTogether(pending.chord, output: pending.output, signature: chordSignature))
-                }
-                continue
+            var typedChordID: UUID?
+            if !customWords.contains(word),
+               let code = typedCode(for: word, chords: useful.map(\.chord), realWords: realWords, used: used) {
+                used.insert(code.letters)
+                let owner = useful.first { $0.chord.id == code.chordID } ?? first
+                typedChordID = owner.chord.id
+                shorthands.append(LaptopShorthand(
+                    chordID: owner.chord.id, output: owner.output, chordKeys: owner.chord.inputKeys, letters: code.letters,
+                    kind: code.fromChord ? .sameKeys : .newShortcut, tokens: [code.letters],
+                    chordSignature: chordKeySignature(owner.chord)
+                ))
             }
-            guard let letters = newShortcut(for: word, realWords: realWords, used: usedSignatures) else {
-                if let chordSignature = pending.chordSignature {
-                    // Nothing new to type, but the keys can still be pressed together.
-                    shorthands.append(pressTogether(pending.chord, output: pending.output, signature: chordSignature))
-                } else {
-                    skipped.append(SkippedShorthand(chordID: pending.chord.id, output: pending.output, chordKeys: pending.chord.inputKeys, reason: .noSavings))
-                }
-                continue
+            // Every other chord for the word is pressed together. Keys that
+            // don't exist on a laptop get comfortable ones, once per word.
+            let typed = typedChordID != nil || customWords.contains(word)
+            for (offset, entry) in useful.enumerated() where entry.chord.id != typedChordID {
+                let signature = chordKeySignature(entry.chord)
+                if signature == nil && (typed || offset > 0) { continue }
+                shorthands.append(pressTogether(entry.chord, output: entry.output, signature: signature))
             }
-            let signature = ShorthandLetters.signature(letters)
-            usedSignatures.insert(signature)
-            shorthands.append(LaptopShorthand(
-                chordID: pending.chord.id,
-                output: pending.output,
-                chordKeys: pending.chord.inputKeys,
-                letters: letters,
-                kind: .newShortcut,
-                signatures: [signature],
-                chordSignature: pending.chordSignature
-            ))
         }
 
         let (pressable, awkward) = assignPressKeys(shorthands, realWords: realWords, usage: usage)
@@ -511,6 +466,108 @@ public enum ShorthandBuilder {
             SkippedShorthand(chordID: $0.chordID, output: $0.output, chordKeys: $0.chordKeys, reason: .awkwardOnLaptop)
         }
         return ShorthandCatalog(shorthands: pressable, skipped: skipped)
+    }
+
+    static func savesEnough(word: String) -> Bool {
+        word.count - 3 >= minimumSavings && word.filter { $0.isASCII && $0.isLetter }.count >= 3
+    }
+
+    /// The letters to type for `word`: three of its letters in order,
+    /// starting with the first (`wrt` for write), that read like the word
+    /// and roll off the fingers. Four only when every three is taken.
+    static func typedCode(
+        for word: String,
+        chords: [ChordEntry],
+        realWords: Set<String>,
+        used: Set<String>
+    ) -> (letters: String, chordID: UUID?, fromChord: Bool)? {
+        guard savesEnough(word: word) else { return nil }
+        let letters = Array(word.filter { $0.isASCII && $0.isLetter })
+        // The chord's own letters in word order, when they are three or four
+        // of the word's letters: already familiar.
+        var chordCodes: [String: UUID] = [:]
+        for chord in chords {
+            let keys = chord.inputKeys.map { $0.lowercased() }
+            guard keys.allSatisfy({ $0.count == 1 && $0.first!.isLetter }) else { continue }
+            let ordered = String(wordOrder(keys.map { Character($0) }, word: String(letters)))
+            if chordCodes[ordered] == nil { chordCodes[ordered] = chord.id }
+        }
+        let wordLetters = String(letters)
+        for size in [3, 4] {
+            guard word.count - size >= minimumSavings, size < letters.count else { break }
+            var best: (score: Double, code: String)?
+            for code in codeCandidates(letters, size: size) {
+                guard !used.contains(code.letters), !realWords.contains(code.letters), code.letters != wordLetters,
+                      let typing = LaptopErgonomics.typingCost(code.letters) else { continue }
+                // Letters you can't recall are slow however well they roll,
+                // so reading like the word comes first.
+                var score = code.readability * 2 + typing * 0.6
+                if chordCodes[code.letters] != nil { score -= 0.8 }
+                if best == nil || score < best!.score { best = (score, code.letters) }
+            }
+            if let best {
+                let chordID = chordCodes[best.code]
+                return (best.code, chordID ?? chords.first?.id, chordID != nil)
+            }
+        }
+        return nil
+    }
+
+    /// Every way to pick `size` of the word's letters in order, starting
+    /// with the first, and how far each strays from how you'd abbreviate it
+    /// by ear: the first letter, then the consonants you hear, optionally
+    /// ending on the last one (`wrt`, `pls`, `smt`).
+    static func codeCandidates(_ letters: [Character], size: Int) -> [(letters: String, readability: Double)] {
+        guard letters.count > size, size >= 2 else { return [] }
+        let vowels: Set<Character> = ["a", "e", "i", "o", "u"]
+        // Rank of each consonant you'd hear, skipping vowels and the second
+        // of a doubled letter.
+        var rank: [Int: Int] = [:]
+        var next = 1
+        for index in letters.indices.dropFirst() where !vowels.contains(letters[index]) && letters[index] != letters[index - 1] {
+            rank[index] = next
+            next += 1
+        }
+        let lastConsonant = rank.max { $0.value < $1.value }?.key
+
+        var results: [(String, Double)] = []
+        var chosen = [0]
+        func recurse(_ start: Int) {
+            if chosen.count == size {
+                var penalty = 0.0
+                var previousRank = 0
+                for (slot, index) in chosen.enumerated().dropFirst() {
+                    guard let current = rank[index] else {
+                        penalty += vowels.contains(letters[index]) ? 1.2 : 0.8
+                        continue
+                    }
+                    let skipped = Double(max(current - previousRank - 1, 0))
+                    // Ending on the word's last consonant is a natural anchor.
+                    let isAnchor = index == lastConsonant && slot == size - 1
+                    penalty += skipped * (isAnchor ? 0.15 : 0.45)
+                    previousRank = current
+                }
+                // The word's start reads fine even with a vowel (`rev`).
+                if chosen == Array(0..<size) { penalty *= 0.6 }
+                let code = String(chosen.map { letters[$0] })
+                if chosen.map({ letters[$0] }).count != Set(chosen.map { letters[$0] }).count { penalty += 0.6 }
+                results.append((code, penalty))
+                return
+            }
+            guard start < letters.count else { return }
+            for index in start..<letters.count where letters.count - index >= size - chosen.count {
+                chosen.append(index)
+                recurse(index + 1)
+                chosen.removeLast()
+            }
+        }
+        recurse(1)
+        // The same letters can come from different positions; keep the best.
+        var best: [String: Double] = [:]
+        for (code, penalty) in results where best[code].map({ penalty < $0 }) ?? true {
+            best[code] = penalty
+        }
+        return best.map { ($0.key, $0.value) }.sorted { $0.0 < $1.0 }
     }
 
     /// Gives every word keys that are comfortable to press together on a
@@ -611,11 +668,11 @@ public enum ShorthandBuilder {
         recurse(0)
     }
 
-    static func pressTogether(_ chord: ChordEntry, output: String, signature: String) -> LaptopShorthand {
+    static func pressTogether(_ chord: ChordEntry, output: String, signature: String?) -> LaptopShorthand {
         LaptopShorthand(
             chordID: chord.id, output: output, chordKeys: chord.inputKeys,
-            letters: wordOrder(Array(signature), word: output.lowercased()).map(String.init).joined(),
-            kind: .pressTogether, signatures: [], chordSignature: signature
+            letters: signature.map { wordOrder(Array($0), word: output.lowercased()).map(String.init).joined() } ?? "",
+            kind: .pressTogether, tokens: [], chordSignature: signature
         )
     }
 
@@ -640,32 +697,6 @@ public enum ShorthandBuilder {
         String(letters.lowercased().filter(ShorthandLetters.isShorthandCharacter))
     }
 
-    /// The letters in the order they appear in the word (`abt` for about),
-    /// or the nearest order that isn't itself a real word.
-    static func typingOrder(_ letters: [Character], word: String, realWords: Set<String>) -> String? {
-        let start = wordOrder(letters, word: word)
-        if !realWords.contains(String(start)) { return String(start) }
-        guard start.count <= 6 else { return nil }
-        for permutation in permutations(start) {
-            let candidate = String(permutation)
-            if !realWords.contains(candidate), candidate != word { return candidate }
-        }
-        return nil
-    }
-
-    /// For DUP chords: the word-order letters with the last one doubled,
-    /// falling back to doubling another letter.
-    static func doubledOrder(base: [Character], word: String, realWords: Set<String>) -> String? {
-        let ordered = wordOrder(base, word: word)
-        for index in ordered.indices.reversed() {
-            var letters = ordered
-            letters.insert(ordered[index], at: index)
-            let candidate = String(letters)
-            if !realWords.contains(candidate), candidate != word { return candidate }
-        }
-        return nil
-    }
-
     static func wordOrder(_ letters: [Character], word: String) -> [Character] {
         var remaining = letters
         var ordered: [Character] = []
@@ -677,72 +708,19 @@ public enum ShorthandBuilder {
         return ordered + remaining
     }
 
-    /// Permutations in an order that keeps the leading letters longest.
-    static func permutations(_ letters: [Character]) -> [[Character]] {
-        guard letters.count > 1 else { return [letters] }
-        var result: [[Character]] = []
-        for (index, letter) in letters.enumerated() {
-            var rest = letters
-            rest.remove(at: index)
-            for tail in permutations(rest) {
-                result.append([letter] + tail)
-            }
-        }
-        return result
-    }
-
-    /// Every token the builder might suggest or you might type for these
-    /// chords, so only those need a real-word check.
+    /// Every token the builder might suggest for these chords, so only
+    /// those need a real-word check.
     public static func candidateTokens(for chords: [ChordEntry]) -> Set<String> {
         var tokens: Set<String> = []
         for chord in chords where chord.enabled {
             guard let output = textOutput(of: chord) else { continue }
-            let keys = chord.inputKeys.map { $0.lowercased() }
-            let letters = keys.filter { $0.count == 1 && $0.allSatisfy(ShorthandLetters.isShorthandCharacter) }.map { Character($0) }
-            var variants: [[Character]] = [letters]
-            if keys.contains("dup") { variants = letters.map { letters + [$0] } }
-            for variant in variants where variant.count >= 2 && variant.count <= 6 {
-                for permutation in permutations(variant) { tokens.insert(String(permutation)) }
+            let word = output.lowercased()
+            guard savesEnough(word: word) else { continue }
+            let letters = Array(word.filter { $0.isASCII && $0.isLetter })
+            for size in [3, 4] where word.count - size >= minimumSavings {
+                tokens.formUnion(codeCandidates(letters, size: size).map(\.letters))
             }
-            tokens.formUnion(newShortcutCandidates(for: output.lowercased()))
         }
         return tokens
-    }
-
-    static func newShortcutCandidates(for word: String) -> [String] {
-        let letters = Array(word.filter { $0.isASCII && $0.isLetter })
-        guard letters.count >= 4, let first = letters.first else { return [] }
-        let vowels: Set<Character> = ["a", "e", "i", "o", "u"]
-        var skeleton: [Character] = [first]
-        for character in letters.dropFirst() where !vowels.contains(character) && character != skeleton.last {
-            skeleton.append(character)
-        }
-        var candidates: [String] = []
-        for length in [3, 4, 2] where skeleton.count >= length {
-            candidates.append(String(skeleton.prefix(length)))
-        }
-        for length in [3, 4] where letters.count > length {
-            candidates.append(String(letters.prefix(length)))
-        }
-        if skeleton.count >= 2, let last = skeleton.last {
-            candidates.append(String([first, skeleton[1], last]))
-        }
-        return candidates
-    }
-
-    /// A short, unused abbreviation that saves at least two keys: the word's
-    /// first letter and following consonants (`elv` for eleven), then
-    /// plain prefixes.
-    static func newShortcut(for word: String, realWords: Set<String>, used: Set<String>) -> String? {
-        let letters = Array(word.filter { $0.isASCII && $0.isLetter })
-        for candidate in newShortcutCandidates(for: word) {
-            guard candidate.count >= 2, candidate.count <= letters.count - 2,
-                  !realWords.contains(candidate) else { continue }
-            let signature = ShorthandLetters.signature(candidate)
-            if !used.contains(signature), signature != ShorthandLetters.signature(word) {
-                return candidate
-            }
-        }
-        return nil
     }
 }
