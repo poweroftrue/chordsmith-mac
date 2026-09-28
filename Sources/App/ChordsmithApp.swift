@@ -23,7 +23,6 @@ struct ChordsmithApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let model: AppModel
     private var statusItem: NSStatusItem?
-    private var popover: NSPopover?
     private var quickChordPanel: NSPanel?
     private var mainWindow: NSWindow?
     private var nudgeController: NudgePanelController?
@@ -71,7 +70,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &observers)
         setupStatusItem()
-        setupPopover()
         setupKeyboardShortcuts()
         setupDoubleTapControl()
         model.start()
@@ -106,8 +104,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.autosaveName = Self.statusItemAutosaveName
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "keyboard.badge.ellipsis", accessibilityDescription: "Chordsmith")
-            button.action = #selector(togglePopover)
+            button.action = #selector(statusItemClicked)
             button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             self?.refreshMenuBarVisibility()
@@ -180,19 +179,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.setAccessibilityLabel("Chordsmith, \(Int((rate * 100).rounded())) percent chorded today")
     }
 
-    private func setupPopover() {
-        popover = NSPopover()
-        popover?.behavior = .transient
-        popover?.contentSize = NSSize(width: 560, height: 620)
-        popover?.contentViewController = NSHostingController(rootView: RootView(model: model))
-    }
-
     private func setupKeyboardShortcuts() {
         KeyboardShortcuts.onKeyUp(for: .togglePanel) { [weak self] in
-            self?.togglePopover()
+            self?.toggleMainWindow()
         }
         KeyboardShortcuts.onKeyUp(for: .quickAdvisor) { [weak self] in
-            self?.showPopover(tab: .advisor)
+            self?.showMainWindow(tab: .advisor)
         }
         KeyboardShortcuts.onKeyUp(for: .quickAdd) { [weak self] in
             self?.showQuickChordPanel()
@@ -228,43 +220,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastControlPress = now
     }
 
-    @objc private func togglePopover() {
-        guard let popover else { return }
-        // A popover pinned to an icon hidden behind the notch would appear
-        // nowhere useful; open the full window instead.
-        if !popover.isShown, isStatusItemHidden {
-            showMainWindow()
-            return
-        }
-        if popover.isShown {
-            popover.performClose(nil)
+    /// Left click opens (or hides) the window; right click shows quick
+    /// actions.
+    @objc private func statusItemClicked() {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            showStatusMenu()
         } else {
-            showPopover()
+            toggleMainWindow()
         }
     }
 
-    private func showPopover(tab: PanelTab? = nil) {
-        guard let button = statusItem?.button, let popover else { return }
-        quickChordPanel?.close()
-        if let tab {
-            model.selectedTab = tab
-        }
-        if isStatusItemHidden {
+    private func toggleMainWindow() {
+        if let mainWindow, mainWindow.isVisible, mainWindow.isKeyWindow, NSApp.isActive {
+            mainWindow.close()
+        } else {
             showMainWindow()
-            return
         }
-        if !popover.isShown {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    }
+
+    private func showStatusMenu() {
+        guard let button = statusItem?.button else { return }
+        let menu = NSMenu()
+        func item(_ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.target = self
+            return item
         }
-        NSApp.activate(ignoringOtherApps: true)
+        menu.addItem(item("Open Chordsmith", #selector(menuOpenWindow)))
+        menu.addItem(item("Add a Chord…", #selector(menuQuickAdd)))
+        menu.addItem(.separator())
+        let shorthand = item(
+            model.shorthandSettings.enabled ? "Laptop Shorthand: On" : "Laptop Shorthand: Off",
+            #selector(menuToggleShorthand)
+        )
+        shorthand.state = model.shorthandSettings.enabled ? .on : .off
+        menu.addItem(shorthand)
+        if model.shorthandSettings.enabled, let app = model.lastExternalApp {
+            let paused = model.shorthandSettings.excludedBundleIDs.contains(app.bundleID)
+            menu.addItem(item(paused ? "Resume Shorthand in \(app.name)" : "Pause Shorthand in \(app.name)", #selector(menuToggleShorthandApp)))
+        }
+        menu.addItem(.separator())
+        menu.addItem(item("Settings…", #selector(menuSettings), key: ","))
+        menu.addItem(item("Quit Chordsmith", #selector(menuQuit), key: "q"))
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.maxY + 5), in: button)
+    }
+
+    @objc private func menuOpenWindow() { showMainWindow() }
+    @objc private func menuQuickAdd() { showQuickChordPanel() }
+    @objc private func menuSettings() { model.openSettings() }
+    @objc private func menuQuit() { NSApp.terminate(nil) }
+
+    @objc private func menuToggleShorthand() {
+        model.shorthandSettings.enabled.toggle()
+        Task { await model.saveShorthandSettings() }
+    }
+
+    @objc private func menuToggleShorthandApp() {
+        guard let app = model.lastExternalApp else { return }
+        model.toggleShorthandPause(forBundleID: app.bundleID)
     }
 
     /// The full panel in a normal, resizable window. While it is open the app
     /// shows in the Dock and the app switcher; closing it returns Chordsmith
     /// to a menu-bar-only app.
-    private func showMainWindow() {
-        popover?.performClose(nil)
+    private func showMainWindow(tab: PanelTab? = nil) {
         quickChordPanel?.close()
+        if let tab {
+            model.selectedTab = tab
+        }
 
         let window: NSWindow
         if let mainWindow {
@@ -303,8 +326,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showQuickChordPanel() {
-        popover?.performClose(nil)
-
         let panel: NSPanel
         if let quickChordPanel {
             panel = quickChordPanel
@@ -367,7 +388,7 @@ extension KeyboardShortcuts.Name {
 
 struct RootView: View {
     @ObservedObject var model: AppModel
-    var isWindowed = false
+    var isWindowed = true
     @State private var searchText = ""
     @StateObject private var addController = QuickChordAddController()
     @State private var addFocusToken = 0
@@ -421,12 +442,12 @@ struct RootView: View {
         .frame(
             minWidth: 560,
             idealWidth: 560,
-            maxWidth: isWindowed ? .infinity : 560,
+            maxWidth: .infinity,
             minHeight: 620,
             idealHeight: 620,
-            maxHeight: isWindowed ? .infinity : 620
+            maxHeight: .infinity
         )
-        .background(isWindowed ? Color(nsColor: .windowBackgroundColor) : Color.clear)
+        .background(Color(nsColor: .windowBackgroundColor))
         .background(LocalShortcutMonitor { event in
             handleShortcut(event)
         })
@@ -476,22 +497,11 @@ struct RootView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Reload the library and usage")
-                if !isWindowed {
-                    Button {
-                        model.openWindowAction?()
-                    } label: {
-                        Image(systemName: "macwindow")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Open in a window (⌥⇧⌘Space)")
-                }
                 Menu {
-                    if !isWindowed {
-                        Button("Open in Window") {
-                            model.openWindowAction?()
-                        }
-                        Divider()
+                    Button("Add a Chord…") {
+                        model.selectedTab = .add
                     }
+                    Divider()
                     Button("Import Chord JSON…") {
                         Task { await model.importChordJSON() }
                     }
@@ -1107,6 +1117,9 @@ struct RootView: View {
                 model.selectedTab = .practice
                 return true
             case "7":
+                model.selectedTab = .laptop
+                return true
+            case "8":
                 model.selectedTab = .usage
                 return true
             case "f", "k":
@@ -1115,7 +1128,7 @@ struct RootView: View {
             case "s":
                 Task { await model.commitStagedChanges() }
                 return true
-            case "w" where isWindowed:
+            case "w":
                 NSApp.keyWindow?.close()
                 return true
             case "z" where !model.stagedChanges.isEmpty:
@@ -1135,11 +1148,7 @@ struct RootView: View {
             if event.keyCode == 51 {
                 return stageSelectedDelete()
             }
-            // Esc dismisses the popover; a real window closes with ⌘W instead.
-            if event.keyCode == 53, !isWindowed {
-                closePopover()
-                return true
-            }
+
         }
 
         return false
@@ -1217,9 +1226,6 @@ struct RootView: View {
         return true
     }
 
-    private func closePopover() {
-        NSApp.keyWindow?.close()
-    }
 }
 
 struct LocalShortcutMonitor: NSViewRepresentable {
@@ -1353,11 +1359,11 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Quick Panel") {
-                KeyboardShortcuts.Recorder(for: .togglePanel)
-                KeyboardShortcuts.Recorder(for: .quickAdvisor)
-                KeyboardShortcuts.Recorder(for: .quickAdd)
-                KeyboardShortcuts.Recorder("Open in window", name: .openWindow)
+            Section("Shortcuts") {
+                KeyboardShortcuts.Recorder("Open or hide Chordsmith", name: .togglePanel)
+                KeyboardShortcuts.Recorder("Open Advisor", name: .quickAdvisor)
+                KeyboardShortcuts.Recorder("Quick Chords", name: .quickAdd)
+                KeyboardShortcuts.Recorder("Open the window", name: .openWindow)
             }
 
             Section("Live coaching") {

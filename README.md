@@ -164,30 +164,41 @@ The advisor is local and deterministic. It uses:
 - existing family chords, such as extending `necessary -> n+e+c` into `unnecessary -> n+e+c+u`;
 - starred chords as local feedback for preferred chord style.
 
-Hard validation always wins. A candidate is rejected if it conflicts with an existing raw input, uses unsupported actions, repeats a physical key, collides on a switch, or hits an impossible thumb lane.
+The advisor also learns from your whole library: how often you include the
+first letter, how many keys you give a word of each length, and which key you
+add for endings (from pairs like `deploy` / `deployment`). A word built on a
+chorded stem gets your stem chord plus your ending key. Two-key chords are kept
+for words you write often, and chords one key away from an unrelated chord are
+penalised because a partial press would type the other word. Two-word phrases
+start from each word's first letter.
 
-## Quick Panel
+Hard validation always wins. A candidate is rejected if it conflicts with an existing raw input, uses unsupported actions, repeats a physical key, needs opposite directions (or three) of one switch, or presses both switches of a thumb lane. Two neighbouring directions of one switch are a diagonal press: allowed, but ranked below cleaner options.
+
+## Window And Shortcuts
+
+Click the menu bar icon to open the Chordsmith window, and click it again to
+hide it. Right-click the icon for quick actions: add a chord, turn laptop
+shorthand on or off or pause it in the current app, Settings, Quit. While the
+window is open Chordsmith appears in the Dock and the app switcher; `Cmd+W`
+closes it and returns it to the menu bar.
 
 Default shortcuts:
 
-- `Cmd+Shift+Space`: open the main panel.
-- `Cmd+Option+Space`: open quick advisor.
-- `Cmd+Shift+A`: open Quick Chords.
-- double-tap `Control`: open Quick Chords.
-- `Cmd+Option+Shift+Space`: open the panel in a full, resizable window.
-
-You can also open the window from the window button or the `⋯` menu in the
-panel, or by opening Chordsmith again from Spotlight or Finder while it is
-running. While the window is open Chordsmith appears in the Dock and the app
-switcher; `Cmd+W` closes it and returns it to the menu bar.
+- `Cmd+Shift+Space`: open or hide the window.
+- `Cmd+Option+Space`: open the window on Advisor.
+- `Cmd+Shift+A` or double-tap `Control`: open Quick Chords.
+- `Cmd+Option+Shift+Space`: open the window.
+- `Cmd+1` … `Cmd+8`: switch tabs.
 
 Inside Quick Chords:
 
-- `Tab`: switch between search and add.
-- `Return`: edit the selected chord or save the current quick add.
-- `Cmd+C`: copy selected output.
-- arrow keys: move through search results or advisor candidates.
-- `Esc`: close.
+- type a word to find its chord; with an empty search, the words you type by
+  hand most are listed so you can add one with `Return`.
+- `Return`: open the selected chord, or save while adding.
+- `Cmd+N`: new chord. `Cmd+F`: back to search. `Cmd+C`: copy the output.
+- arrow keys: move through results or suggested keys.
+- `Tab`: next field while adding.
+- `Esc`: step back (stop recording, back to search, clear the search, close).
 
 ## Device Workflow
 
