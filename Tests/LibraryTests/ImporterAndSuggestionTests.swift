@@ -261,7 +261,7 @@ final class ImporterAndSuggestionTests: XCTestCase {
         XCTAssertEqual(report.first?.confidence, .confirmedHardware)
     }
 
-    func testSuggestionEngineRejectsSameSwitchCandidatesOnCC2() {
+    func testSuggestionEngineMarksDiagonalSameSwitchCandidatesOnCC2() {
         let engine = SuggestionEngine()
         let words = [
             WordStat(
@@ -285,14 +285,28 @@ final class ImporterAndSuggestionTests: XCTestCase {
         XCTAssertNotNil(suggestion)
         let candidates = suggestion?.candidates ?? []
         XCTAssertFalse(candidates.isEmpty)
-        XCTAssertFalse(candidates.contains { Set($0.inputKeys).isSuperset(of: ["e", "r"]) })
+        // e and r sit on neighbouring directions of one switch: a diagonal
+        // press, allowed but never preferred.
+        XCTAssertFalse(Set(candidates[0].inputKeys).isSuperset(of: ["e", "r"]))
+        XCTAssertTrue(candidates.filter { Set($0.inputKeys).isSuperset(of: ["e", "r"]) }.allSatisfy { candidate in
+            candidate.softReasons.contains { $0.contains("Diagonal press") }
+        })
+    }
+
+    func testOppositeDirectionsConflictButNeighboursPressDiagonally() {
+        let physicalModel = M4GPhysicalModel.defaultA1
+        // p (north) and d (south) are opposite: impossible together.
+        XCTAssertFalse(physicalModel.hardConflictReasons(for: ["p", "d"]).isEmpty)
+        // f (west) is next to both: a diagonal press.
+        XCTAssertTrue(physicalModel.hardConflictReasons(for: ["p", "f"]).isEmpty)
+        XCTAssertFalse(physicalModel.diagonalPresses(for: ["p", "f"]).isEmpty)
+        XCTAssertTrue(physicalModel.hardConflictReasons(for: ["d", "f"]).isEmpty)
+        // Three directions of one switch at once can't be pressed.
+        XCTAssertFalse(physicalModel.hardConflictReasons(for: ["p", "d", "f"]).isEmpty)
     }
 
     func testAdvisorFindsConflictFreeFallbackWhenPDFLettersShareOneM4GSwitch() {
         let physicalModel = M4GPhysicalModel.defaultA1
-        XCTAssertFalse(physicalModel.hardConflictReasons(for: ["p", "d"]).isEmpty)
-        XCTAssertFalse(physicalModel.hardConflictReasons(for: ["p", "f"]).isEmpty)
-        XCTAssertFalse(physicalModel.hardConflictReasons(for: ["d", "f"]).isEmpty)
 
         let candidates = SuggestionEngine().adviseChord(
             for: "PDF",
@@ -303,7 +317,7 @@ final class ImporterAndSuggestionTests: XCTestCase {
 
         let pdfLetters = Set(["p", "d", "f"])
         XCTAssertFalse(candidates.isEmpty)
-        XCTAssertEqual(Set(candidates.first?.inputKeys ?? []), Set([".", "p"]))
+        XCTAssertTrue(candidates.first?.inputKeys.contains("p") ?? false)
         XCTAssertTrue(candidates.allSatisfy { candidate in
             candidate.hardFailures.isEmpty
                 && !pdfLetters.isDisjoint(with: candidate.inputKeys)
@@ -500,16 +514,19 @@ final class ImporterAndSuggestionTests: XCTestCase {
         )
 
         let engine = SuggestionEngine()
-        let rejected = engine.diagnoseRejectedCandidates(
+        let candidates = engine.adviseChord(
             for: "creation",
             profile: .cc2A1,
             existingChords: [existing],
-            limit: 20
+            limit: 50
         )
 
-        XCTAssertTrue(rejected.contains { candidate in
-            Set(candidate.inputKeys) == Set(["a", "t"]) &&
-            candidate.hardFailures.contains { $0.contains("Same-switch") }
+        // a and t share a switch in neighbouring directions: a diagonal
+        // press, allowed with a warning and never the first choice.
+        XCTAssertFalse(M4GPhysicalModel.defaultA1.diagonalPresses(for: ["a", "t"]).isEmpty)
+        XCTAssertNotEqual(Set(candidates.first?.inputKeys ?? []), Set(["a", "t"]))
+        XCTAssertTrue(candidates.filter { Set($0.inputKeys).isSuperset(of: ["a", "t"]) }.allSatisfy { candidate in
+            candidate.softReasons.contains { $0.contains("Diagonal press") }
         })
     }
 
@@ -636,11 +653,11 @@ final class ImporterAndSuggestionTests: XCTestCase {
         XCTAssertFalse(candidates.isEmpty)
         XCTAssertTrue(candidates.allSatisfy { $0.hardFailures.isEmpty })
         XCTAssertTrue(candidates.contains { candidate in
-            Set(["r", "s", "t"]).isSubset(of: Set(candidate.inputKeys)) &&
-            candidate.inputKeys.count >= 4 &&
-            candidate.softReasons.contains { $0.contains("Long ergonomic fallback") }
+            Set(["r", "s", "t"]).isSubset(of: Set(candidate.inputKeys)) && candidate.inputKeys.count >= 4
         })
-        XCTAssertFalse(candidates.contains { Set($0.inputKeys).isSuperset(of: ["a", "t"]) })
+        XCTAssertTrue(candidates.filter { Set($0.inputKeys).isSuperset(of: ["a", "t"]) }.allSatisfy { candidate in
+            candidate.softReasons.contains { $0.contains("Diagonal press") }
+        })
     }
 
     func testSmartLongFallbackDoesNotTriggerWhenCompactCoreIsValid() {
@@ -690,13 +707,16 @@ final class ImporterAndSuggestionTests: XCTestCase {
             for: "impressive",
             profile: .cc2A1,
             existingChords: [],
-            limit: 50
+            limit: 200
         )
+        let accepted = engine.adviseChord(for: "impressive", profile: .cc2A1, existingChords: [], limit: 200)
 
-        XCTAssertTrue(rejected.contains { candidate in
-            Set(candidate.inputKeys).isSuperset(of: ["m", "v"]) &&
-            candidate.hardFailures.contains { $0.contains("Same-switch") || $0.contains("left thumb lane") }
+        // m and v are neighbours on one thumb switch (diagonal); with a key
+        // from the other thumb switch it can't be pressed.
+        XCTAssertTrue(accepted.filter { Set($0.inputKeys).isSuperset(of: ["m", "v"]) }.allSatisfy { candidate in
+            candidate.softReasons.contains { $0.contains("Diagonal press") }
         })
+        XCTAssertTrue(rejected.allSatisfy { candidate in !candidate.hardFailures.isEmpty })
     }
 
     func testChordFeedbackStarPersistsLocally() async throws {

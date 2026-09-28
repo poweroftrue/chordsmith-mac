@@ -53,6 +53,27 @@ struct M4GConflictGroup: Hashable, Sendable {
     let kind: Kind
     let label: String
     let tokens: Set<String>
+    /// Where each token sits on the switch, for same-switch groups.
+    var directions: [String: M4GDirection] = [:]
+    /// Which switch each token is on, for thumb-lane groups.
+    var switchOf: [String: String] = [:]
+
+    /// The thumb can't press the upper and lower switch of its lane at once;
+    /// two keys on one of those switches are a diagonal press instead.
+    func spansSwitches(_ collision: Set<String>) -> Bool {
+        guard kind == .sameThumbLane else { return true }
+        return Set(collision.compactMap { switchOf[$0] }).count > 1
+    }
+
+    /// Two neighbouring directions of one switch can be pressed together by
+    /// pushing it diagonally (your c+k chord for "click" does this); opposite
+    /// directions, or three at once, cannot.
+    func isDiagonal(_ collision: Set<String>) -> Bool {
+        guard kind == .sameSwitch, collision.count == 2 else { return false }
+        let pair = Set(collision.compactMap { directions[$0] })
+        guard pair.count == 2 else { return false }
+        return pair != [.north, .south] && pair != [.east, .west]
+    }
 
     func reason(for collision: Set<String>) -> String {
         let collisionText = collision.sorted().joined(separator: ", ")
@@ -88,9 +109,11 @@ struct M4GPhysicalModel: Sendable {
         var switchGroups: [[String]] = []
         var switchConflictGroups: [M4GConflictGroup] = []
         var thumbLaneGroups: [String: Set<String>] = [:]
+        var thumbLaneSwitches: [String: [String: String]] = [:]
 
         for switchDefinition in Self.officialSwitchGeometry {
             var switchTokens: [String] = []
+            var switchDirections: [String: M4GDirection] = [:]
 
             for (direction, slot) in switchDefinition.directions.sorted(by: { $0.key < $1.key }) {
                 guard slot < layoutActions.count else { continue }
@@ -111,6 +134,7 @@ struct M4GPhysicalModel: Sendable {
 
                 placements[token, default: []].append(placement)
                 switchTokens.append(token)
+                switchDirections[token] = switchDirections[token] ?? direction
             }
 
             let uniqueSwitchTokens = Array(Set(switchTokens)).sorted()
@@ -120,13 +144,17 @@ struct M4GPhysicalModel: Sendable {
                     M4GConflictGroup(
                         kind: .sameSwitch,
                         label: switchDefinition.label,
-                        tokens: Set(uniqueSwitchTokens)
+                        tokens: Set(uniqueSwitchTokens),
+                        directions: switchDirections
                     )
                 )
             }
 
             if let thumbLane = switchDefinition.thumbLane {
-                thumbLaneGroups[thumbLane, default: []].formUnion(uniqueSwitchTokens)
+                thumbLaneGroups[thumbLane, default: []].formUnion(switchTokens)
+                for token in switchTokens where thumbLaneSwitches[thumbLane, default: [:]][token] == nil {
+                    thumbLaneSwitches[thumbLane, default: [:]][token] = switchDefinition.id
+                }
             }
         }
 
@@ -136,7 +164,8 @@ struct M4GPhysicalModel: Sendable {
                 M4GConflictGroup(
                     kind: .sameThumbLane,
                     label: lane,
-                    tokens: tokens
+                    tokens: tokens,
+                    switchOf: thumbLaneSwitches[lane] ?? [:]
                 )
             }
 
@@ -158,8 +187,18 @@ struct M4GPhysicalModel: Sendable {
         let tokenSet = Set(tokens.map(Self.normalizedToken))
         return hardConflictGroups.compactMap { group in
             let collision = group.tokens.intersection(tokenSet)
-            guard collision.count > 1 else { return nil }
+            guard collision.count > 1, !group.isDiagonal(collision), group.spansSwitches(collision) else { return nil }
             return group.reason(for: collision)
+        }
+    }
+
+    /// Switches this chord presses diagonally: allowed, but a little harder.
+    func diagonalPresses(for tokens: [String]) -> [String] {
+        let tokenSet = Set(tokens.map(Self.normalizedToken))
+        return hardConflictGroups.compactMap { group in
+            let collision = group.tokens.intersection(tokenSet)
+            guard group.isDiagonal(collision) else { return nil }
+            return "Diagonal press on the \(group.label): \(collision.sorted().joined(separator: "+"))."
         }
     }
 

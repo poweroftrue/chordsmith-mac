@@ -311,6 +311,8 @@ public struct GrowthPlanner: Sendable {
                 profile: profile,
                 existingChords: workingChords,
                 bannedInputs: bannedInputs,
+                // Scaled to 90 days, the window the advisor's rules assume.
+                usage: entry.usage.frequency * 90 / max(windowDays, 1),
                 limit: 3
             )
             guard let best = candidates.first else { continue }

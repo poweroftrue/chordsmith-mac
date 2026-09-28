@@ -131,6 +131,25 @@ private struct StarredStyleModel: Sendable {
     }
 }
 
+/// A chord built from your chord for the stem plus an ending key.
+struct LearnedFamilyHint: Sendable {
+    let base: String
+    let baseKeys: [String]
+    let suffix: String
+    let marker: String
+    let learned: Bool
+}
+
+/// What the advisor knows about you for one word.
+struct PersonalScoring {
+    let style: LibraryStyleModel
+    let familyHint: LearnedFamilyHint?
+    let neighbors: ChordNeighborIndex
+    /// Times you wrote the word in the last 90 days, when known.
+    let usage: Int?
+    let initials: [String]
+}
+
 public struct SuggestionEngine: Sendable {
     private let morphologyIndex: EnglishMorphologyIndex
     private let anchorAnalyzer: WordAnchorAnalyzer
@@ -151,11 +170,14 @@ public struct SuggestionEngine: Sendable {
         existingChords: [ChordEntry],
         bannedInputs: Set<String> = [],
         allowReplacingOutput: Bool = false,
+        usage: Int? = nil,
         limit: Int = 10
     ) -> [Candidate] {
         let normalizedWord = word
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
         guard normalizedWord.count >= 2 else { return [] }
 
         let existingOutputs = Set(existingChords.map { ($0.plainOutput ?? $0.output).lowercased() })
@@ -165,7 +187,7 @@ public struct SuggestionEngine: Sendable {
 
         let stat = WordStat(
             word: normalizedWord,
-            frequency: 100,
+            frequency: usage ?? 100,
             avgMs: 300,
             lastUsedAt: .now,
             source: "advisor"
@@ -182,7 +204,8 @@ public struct SuggestionEngine: Sendable {
                 existingChords: existingChords,
                 existingInputs: existingInputs,
                 existingInputIdentities: existingInputIdentities,
-                bannedInputs: bannedInputs
+                bannedInputs: bannedInputs,
+                usage: usage
             )
             .prefix(limit)
         )
@@ -327,10 +350,21 @@ public struct SuggestionEngine: Sendable {
         existingInputs: Set<String>,
         existingInputIdentities: Set<String>,
         bannedInputs: Set<String>,
-        includeRejected: Bool = false
+        includeRejected: Bool = false,
+        usage: Int? = nil
     ) -> [Candidate] {
         let anchorAnalysis = anchorAnalyzer.analysis(for: word)
-        let priorityLetters = anchorAnalysis.orderedTokens
+        // A phrase leans on each word's first letter.
+        let phraseWords = word.split(separator: " ").map(String.init)
+        let isPhrase = phraseWords.count > 1
+        let initials = orderedUnique(phraseWords.compactMap { $0.first.map(String.init) })
+            .filter { definition.placements[$0] != nil }
+        let priorityLetters = orderedUnique((isPhrase ? initials : []) + anchorAnalysis.orderedTokens)
+            .filter { $0 != " " && $0 != "space" }
+        let style = LibraryStyleModel(existingChords: existingChords)
+        let family = FamilyMarkerModel(existingChords: existingChords)
+        let neighbors = ChordNeighborIndex(existingChords: existingChords)
+        var familyHints: [[String]: LearnedFamilyHint] = [:]
         let maxBaseLength = min(priorityLetters.count, 5)
         var candidateInputs: Set<[String]> = []
         var candidateHints: [[String]: CandidateHint] = [:]
@@ -355,6 +389,53 @@ public struct SuggestionEngine: Sendable {
 
         for (keys, hint) in familyCandidateHints(for: word, existingChords: existingChords) {
             insertCandidate(keys, hint: hint)
+        }
+
+        // Your chord for the stem plus the key you use for this ending.
+        if !isPhrase {
+            for extensionCandidate in family.extensions(for: word) {
+                for marker in extensionCandidate.markers {
+                    let keys = extensionCandidate.baseKeys + [marker.key]
+                    guard keys.count <= 6 else { continue }
+                    insertCandidate(keys)
+                    let normalized = keys.map { $0.lowercased() }
+                    if familyHints[normalized] == nil {
+                        familyHints[normalized] = LearnedFamilyHint(
+                            base: extensionCandidate.base,
+                            baseKeys: extensionCandidate.baseKeys,
+                            suffix: extensionCandidate.suffix,
+                            marker: marker.key,
+                            learned: marker.learned
+                        )
+                    }
+                }
+            }
+        }
+
+        // Where you have your own key for this ending, the built-in
+        // morphology marker for the same stem would only compete with it.
+        let learnedMarkersByBase = Dictionary(
+            familyHints.values.filter(\.learned).map { ($0.base, [$0.marker]) },
+            uniquingKeysWith: +
+        )
+        for (keys, hint) in candidateHints {
+            if let learned = learnedMarkersByBase[hint.lemma], !learned.contains(hint.suffixMarker) {
+                candidateHints.removeValue(forKey: keys)
+            }
+        }
+
+        // Most of your chords include the first letter (every word's, for a
+        // phrase), so build plenty of candidates around it.
+        if !initials.isEmpty {
+            let rest = Array(priorityLetters.filter { !initials.contains($0) }.prefix(7))
+            for size in 0...min(3, rest.count) {
+                for combo in combinations(of: rest, taking: size) where initials.count + combo.count <= 5 {
+                    insertCandidate(initials + combo)
+                    if isPhrase {
+                        insertCandidate(initials + combo + ["space"])
+                    }
+                }
+            }
         }
 
         for alias in memorableAliases(for: word, priorityLetters: priorityLetters) {
@@ -406,7 +487,14 @@ public struct SuggestionEngine: Sendable {
                     isLongFallback: longFallbackInputs.contains($0),
                     isConflictFallback: conflictFallbackInputs.contains($0),
                     usesSymbolNamespace: symbolNamespaceInputs.contains($0),
-                    starredStyleModel: starredStyleModel
+                    starredStyleModel: starredStyleModel,
+                    personal: PersonalScoring(
+                        style: style,
+                        familyHint: familyHints[$0],
+                        neighbors: neighbors,
+                        usage: usage,
+                        initials: isPhrase ? initials : Array(initials.prefix(1))
+                    )
                 )
             }
             .sorted { lhs, rhs in
@@ -426,7 +514,7 @@ public struct SuggestionEngine: Sendable {
             scored = scoredCandidates()
         }
 
-        if scored.allSatisfy({ !$0.hardFailures.isEmpty }) {
+        if scored.filter({ $0.hardFailures.isEmpty }).count < 3 {
             for fallback in conflictRelaxedFallbackCandidates(
                 priorityLetters: priorityLetters,
                 definition: definition
@@ -531,7 +619,8 @@ public struct SuggestionEngine: Sendable {
         isLongFallback: Bool,
         isConflictFallback: Bool,
         usesSymbolNamespace: Bool,
-        starredStyleModel: StarredStyleModel
+        starredStyleModel: StarredStyleModel,
+        personal: PersonalScoring? = nil
     ) -> Candidate {
         let normalizedKeys = inputKeys.map { $0.lowercased() }
         let normalizedInput = ChordEntry.normalizeInputKeys(normalizedKeys)
@@ -540,7 +629,19 @@ public struct SuggestionEngine: Sendable {
             : nil
         var hardFailures: [String] = []
         var softReasons: [String] = []
+        /// Reasons shown first: why this chord suits you.
+        var leadReasons: [String] = []
         var score = 100.0
+
+        if let familyHint = personal?.familyHint {
+            // Your own habit outranks the built-in morphology marker (+32) and
+            // the anchor bonus a letter of the ending gets.
+            score += familyHint.learned ? 50 : 14
+            let base = familyHint.baseKeys.joined(separator: "+")
+            leadReasons.append(familyHint.learned
+                ? "Extends \(familyHint.base) (\(base)) with `\(familyHint.marker)`, like your other -\(familyHint.suffix) words."
+                : "Extends \(familyHint.base) (\(base)) with `\(familyHint.marker)` for -\(familyHint.suffix).")
+        }
 
         if let hint {
             score += 18
@@ -551,7 +652,7 @@ public struct SuggestionEngine: Sendable {
                 score += 6
             }
             let markerText = hint.isSecondaryMarker ? "namespace" : "marker"
-            softReasons.append("Extends \(hint.lemma) with \(hint.relation.displayName) \(markerText) `\(hint.suffixMarker)`.")
+            leadReasons.append("Extends \(hint.lemma) with \(hint.relation.displayName) \(markerText) `\(hint.suffixMarker)`.")
         }
 
         if Set(normalizedKeys).count != normalizedKeys.count {
@@ -576,6 +677,12 @@ public struct SuggestionEngine: Sendable {
             }
 
             hardFailures.append(contentsOf: m4gPhysicalModel.hardConflictReasons(for: normalizedKeys))
+            // Possible, but harder than pressing separate switches: only
+            // chosen when the cleaner options are taken.
+            for diagonal in m4gPhysicalModel.diagonalPresses(for: normalizedKeys) {
+                score -= 20
+                softReasons.append(diagonal)
+            }
         }
 
         var seenFingers: [String: Int] = [:]
@@ -601,9 +708,29 @@ public struct SuggestionEngine: Sendable {
             softReasons.append("Uses `x`, which is a stretch on ANSI layouts.")
         }
 
-        if normalizedKeys.count == 2, stat.frequency < 5, word.count < 6 {
+        if let usage = personal?.usage {
+            // Two-key chords are few; spend them on words you write a lot.
+            if normalizedKeys.count == 2, usage < 40 {
+                score -= 14
+                leadReasons.append("Two-key chords are scarce; you wrote this \(usage)× in 90 days.")
+            } else if normalizedKeys.count == 2, usage >= 300 {
+                score += 6
+                leadReasons.append("You write this often enough to earn a two-key chord.")
+            }
+        } else if normalizedKeys.count == 2, stat.frequency < 5, word.count < 6 {
             score -= 12
             softReasons.append("Two-key chords are premium; this word is not valuable enough yet.")
+        }
+
+        if let personal {
+            let style = personal.style.score(keys: normalizedKeys, word: word, initials: personal.initials)
+            score += style.score
+            leadReasons.append(contentsOf: style.reasons)
+            let close = personal.neighbors.neighbors(of: normalizedKeys, word: word)
+            if let first = close.first {
+                score -= min(Double(close.count) * 3, 9)
+                softReasons.append("One key away from “\(first)”: a partial press could type it.")
+            }
         }
 
         if word.hasSuffix("ly"), !normalizedKeys.contains("l") {
@@ -659,7 +786,7 @@ public struct SuggestionEngine: Sendable {
             inputKeys: normalizedKeys,
             score: score,
             hardFailures: hardFailures,
-            softReasons: softReasons
+            softReasons: leadReasons + softReasons
         )
     }
 

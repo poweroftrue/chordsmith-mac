@@ -986,8 +986,22 @@ public actor LibraryService {
             existingChords: existingChords,
             bannedInputs: try bannedInputs(),
             allowReplacingOutput: allowExistingOutput,
+            usage: try recentUsage(of: word),
             limit: limit
         )
+    }
+
+    /// Times a word (or phrase) was written in the last 90 days.
+    public func recentUsage(of word: String, days: Int = 90, now: Date = .now) throws -> Int {
+        let normalized = word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let start = usageDay(for: Calendar.current.date(byAdding: .day, value: -(days - 1), to: now) ?? now)
+        let table = normalized.contains(" ") ? "daily_phrase_stats" : "daily_word_stats"
+        let column = normalized.contains(" ") ? "phrase" : "word"
+        let rows = try database.query(
+            "SELECT SUM(frequency) AS frequency FROM \(table) WHERE \(column) = ? AND day >= ?",
+            bindings: [.text(normalized), .text(start)]
+        )
+        return Int(rows.first?.integer("frequency") ?? 0)
     }
 
     public func diagnoseRejectedChordCandidates(
