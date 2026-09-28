@@ -172,6 +172,22 @@ for words you write often, and chords one key away from an unrelated chord are
 penalised because a partial press would type the other word. Two-word phrases
 start from each word's first letter.
 
+It learns mostly from the chords you use: each chord counts by how often you
+write its word, so never-used chords barely shape the suggestions. It also
+learns which switches you press together in those chords, since a chord can
+break the letter rules (`,+a+l+n` for national) and still sit well under your
+hands. When a word's natural letters are taken, it offers them with one of the
+marker symbols you use (`/+p+t+c`), about as often as you use markers yourself.
+
+**Reclaiming keys.** When the best keys for a new word belong to a chord you
+barely write (about once a month or less over every day the recorder ran, and
+added over 30 days ago), the advisor offers them second in the list, with a
+note: "Takes these keys from “god” (never written in 46 days); it moves to
+.+g+d". Choosing it moves the old chord to its new keys and adds the new word
+in one commit; nothing is deleted. Usage over your whole history decides, not
+recency, so words you use for one project at a time keep their chords. Grow's
+batches never move chords.
+
 Hard validation always wins. A candidate is rejected if it conflicts with an existing raw input, uses unsupported actions, repeats a physical key, needs two or more directions of one switch, or presses both switches of a thumb lane. Suggestions never need a diagonal press (two neighbouring directions of one switch); a chord you enter yourself may use one.
 
 ## Window And Shortcuts

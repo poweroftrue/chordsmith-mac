@@ -264,8 +264,26 @@ final class QuickChordAddController: ObservableObject {
         return true
     }
 
+    /// The suggestion you picked, when it takes keys from a barely used
+    /// chord and the keys field still holds exactly those keys.
+    var activeReclaim: (candidate: Candidate, reclaim: ChordReclaim)? {
+        guard editingChord == nil, outputMode == .plain,
+              let selected = quickCandidates.first(where: { $0.id == selectedQuickCandidateID }),
+              let reclaim = selected.reclaim else { return nil }
+        let typed = Set(ChordInputValidator.tokens(from: inputText, compactRepeatsUseDup: true).map { $0.lowercased() })
+        return typed == Set(selected.inputKeys.map { $0.lowercased() }) ? (selected, reclaim) : nil
+    }
+
     func quickSave(model: AppModel, onSuccess: @escaping () -> Void) async {
         guard !isCommitting else { return }
+        if let active = activeReclaim {
+            isCommitting = true
+            let word = outputText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let succeeded = await model.quickCommitReclaim(active.reclaim, keys: active.candidate.inputKeys, word: word)
+            isCommitting = false
+            if succeeded { onSuccess() } else { localError = model.lastError ?? "Couldn't move the old chord." }
+            return
+        }
         let replacement = editingChord ?? replacementChord(in: model)
         if outputMode == .plain, let replacement, !AppModel.isQuickEditablePlainDeviceChord(replacement) {
             localError = "Quick replacement is disabled for non-plain action chords to preserve raw device actions."
@@ -395,7 +413,7 @@ struct QuickChordAddView: View {
                     if controller.isCommitting {
                         ProgressView().controlSize(.small)
                     } else {
-                        Text(isDuplicate ? "Already added" : saveTitle)
+                        Text(isDuplicate ? "Already added" : controller.activeReclaim != nil ? "Move & Add" : saveTitle)
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -606,7 +624,14 @@ struct QuickChordAddView: View {
 
     @ViewBuilder
     private var messages: some View {
-        if let replacementChord, controller.editingChord == nil {
+        if let active = controller.activeReclaim {
+            Label(
+                "“\(active.reclaim.output)” moves to \(active.reclaim.movedKeys.joined(separator: "+")) so this word can have these keys. Nothing is deleted.",
+                systemImage: "arrow.left.arrow.right"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        } else if let replacementChord, controller.editingChord == nil {
             let current = (replacementChord.plainOutput ?? replacementChord.output).trimmingCharacters(in: .whitespacesAndNewlines)
             Group {
                 if isDuplicate {
@@ -1238,7 +1263,15 @@ private struct QuickAdvisorCandidateRow: View {
             if rank == 0 {
                 PanelBadge(text: "Best", tint: .green)
             }
-            Text(candidate.softReasons.first ?? "Free and easy to press")
+            if let reclaim = candidate.reclaim {
+                PanelBadge(text: "from “\(reclaim.output)”", tint: .secondary)
+                    .help(candidate.softReasons.first ?? "")
+            }
+            Text(candidate.reclaim.map { reclaim in
+                reclaim.uses == 0
+                    ? "never written in \(reclaim.historyDays) days; it moves to \(reclaim.movedKeys.joined(separator: "+"))"
+                    : "written \(reclaim.uses)× in \(reclaim.historyDays) days; it moves to \(reclaim.movedKeys.joined(separator: "+"))"
+            } ?? candidate.softReasons.first ?? "Free and easy to press")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

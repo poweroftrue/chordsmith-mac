@@ -16,36 +16,52 @@ struct LibraryStyleModel: Sendable {
     let lastLetterRate: Double
     /// Share of chords whose letter keys all appear in the word.
     let inWordRate: Double
+    /// Share of chords with a marker symbol such as `/` or `,`.
+    let markerRate: Double
+    static let markerTokens: Set<String> = [".", "'", "`", ",", ";", "/"]
     /// Average key count by word length (capped at 12).
     private let typicalLength: [Int: Double]
 
     var isTrained: Bool { sampleSize >= Self.minimumSample }
 
-    init(existingChords: [ChordEntry]) {
+    /// How much a chord says about your habits: chords for words you write
+    /// count by how often you write them; chords you never use barely count.
+    static func weight(uses: Int?) -> Double {
+        guard let uses else { return 1 }
+        return uses > 0 ? 1 + log2(1 + Double(uses)) : 0.1
+    }
+
+    init(existingChords: [ChordEntry], uses: [String: Int]? = nil) {
         var sample = 0
-        var first = 0
-        var last = 0
-        var inWord = 0
-        var lengthTotals: [Int: (sum: Int, count: Int)] = [:]
+        var totalWeight = 0.0
+        var first = 0.0
+        var last = 0.0
+        var inWord = 0.0
+        var markers = 0.0
+        var lengthTotals: [Int: (sum: Double, count: Double)] = [:]
         for chord in existingChords {
             let word = (chord.plainOutput ?? chord.output).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard word.count >= 3, word.allSatisfy(\.isLetter) else { continue }
             let keys = chord.inputKeys.map { $0.lowercased() }
             guard !keys.isEmpty else { continue }
+            let weight = Self.weight(uses: uses.map { $0[word] ?? 0 })
             sample += 1
-            if let head = word.first, keys.contains(String(head)) { first += 1 }
-            if let tail = word.last, keys.contains(String(tail)) { last += 1 }
+            totalWeight += weight
+            if let head = word.first, keys.contains(String(head)) { first += weight }
+            if let tail = word.last, keys.contains(String(tail)) { last += weight }
             let letterKeys = keys.filter { $0.count == 1 && $0.first!.isLetter }
-            if letterKeys.allSatisfy({ word.contains($0) }) { inWord += 1 }
+            if letterKeys.allSatisfy({ word.contains($0) }) { inWord += weight }
+            if keys.contains(where: Self.markerTokens.contains) { markers += weight }
             let bucket = min(word.count, 12)
             let current = lengthTotals[bucket] ?? (0, 0)
-            lengthTotals[bucket] = (current.sum + keys.count, current.count + 1)
+            lengthTotals[bucket] = (current.sum + Double(keys.count) * weight, current.count + weight)
         }
         sampleSize = sample
-        firstLetterRate = sample > 0 ? Double(first) / Double(sample) : 0
-        lastLetterRate = sample > 0 ? Double(last) / Double(sample) : 0
-        inWordRate = sample > 0 ? Double(inWord) / Double(sample) : 0
-        typicalLength = lengthTotals.mapValues { Double($0.sum) / Double(max($0.count, 1)) }
+        firstLetterRate = totalWeight > 0 ? first / totalWeight : 0
+        lastLetterRate = totalWeight > 0 ? last / totalWeight : 0
+        inWordRate = totalWeight > 0 ? inWord / totalWeight : 0
+        markerRate = totalWeight > 0 ? markers / totalWeight : 0
+        typicalLength = lengthTotals.mapValues { $0.sum / max($0.count, 0.001) }
     }
 
     /// The number of keys you usually give a word this long.

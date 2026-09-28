@@ -987,8 +987,29 @@ public actor LibraryService {
             bannedInputs: try bannedInputs(),
             allowReplacingOutput: allowExistingOutput,
             usage: try recentUsage(of: word),
+            slotUsage: profile == .cc2A1 ? try slotUsage() : nil,
             limit: limit
         )
+    }
+
+    /// Every word's uses over all recorded history, and how many days the
+    /// recorder ran, for deciding which chords you barely use.
+    public func slotUsage(now: Date = .now) throws -> SlotUsage {
+        var uses: [String: Int] = [:]
+        for row in try database.query(
+            """
+            SELECT word, SUM(frequency) AS frequency FROM daily_word_stats
+            WHERE source != 'nexus_import' GROUP BY word
+            """
+        ) {
+            if let word = row.string("word"), let frequency = row.integer("frequency") {
+                uses[word.lowercased(), default: 0] += Int(frequency)
+            }
+        }
+        let days = try database.query(
+            "SELECT COUNT(DISTINCT day) AS days FROM daily_word_stats WHERE source != 'nexus_import'"
+        ).first?.integer("days") ?? 0
+        return SlotUsage(uses: uses, historyDays: Int(days), now: now)
     }
 
     /// Times a word (or phrase) was written in the last 90 days.
@@ -1500,6 +1521,7 @@ extension LibraryService {
             skippedWords: try skippedGrowthWords(),
             dictionary: dictionary,
             windowDays: days,
+            slotUsage: profile == .cc2A1 ? try slotUsage(now: now) : nil,
             limit: limit
         )
         return GrowthPlan(

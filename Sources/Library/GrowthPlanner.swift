@@ -201,6 +201,7 @@ public struct GrowthPlanner: Sendable {
         skippedWords: Set<String>,
         dictionary: Set<String> = [],
         windowDays: Int,
+        slotUsage: SlotUsage? = nil,
         limit: Int
     ) -> GrowthPlan {
         let chordsByWord = Self.chordsByOutputWord(existingChords)
@@ -313,6 +314,9 @@ public struct GrowthPlanner: Sendable {
                 bannedInputs: bannedInputs,
                 // Scaled to 90 days, the window the advisor's rules assume.
                 usage: entry.usage.frequency * 90 / max(windowDays, 1),
+                // Learn from the chords you use; a batch never moves chords.
+                slotUsage: slotUsage,
+                offerReclaims: false,
                 limit: 3
             )
             guard let best = candidates.first else { continue }

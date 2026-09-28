@@ -736,6 +736,65 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// Moves a barely used chord to its new keys and gives its old keys to
+    /// `word`, in one commit so the library is never left without either.
+    func quickCommitReclaim(_ reclaim: ChordReclaim, keys: [String], word: String) async -> Bool {
+        guard let changes = reclaimChanges(reclaim, keys: keys, word: word, source: "quick_add") else {
+            lastError = "“\(reclaim.output)” changed since the suggestion was made. Search again."
+            return false
+        }
+        let moved = "“\(reclaim.output)” moved to \(reclaim.movedKeys.joined(separator: "+"))"
+        return await commitChanges(
+            changes,
+            clearStagedChangesOnLocalCommit: false,
+            refreshSuggestions: false,
+            startStatus: "Moving “\(reclaim.output)” and adding “\(word)”…",
+            localOnlyStatus: "Added “\(word)”; \(moved)",
+            syncingStatus: "Committed locally; syncing M4G…",
+            syncedStatus: "Added “\(word)” and synced; \(moved)",
+            queuedStatus: "Committed locally; M4G sync failed and is queued",
+            queueSaveFailedStatus: "Committed locally; M4G sync failed and queue save failed",
+            failureStatus: "Reclaim failed"
+        )
+    }
+
+    /// Delete the old chord, add it back on its new keys, add the new word on
+    /// the freed keys. Nil if the old chord is gone or either key set fails.
+    private func reclaimChanges(_ reclaim: ChordReclaim, keys: [String], word: String, source: String) -> [StagedChordChange]? {
+        guard let occupant = chords.first(where: { $0.id == reclaim.chordID }) else { return nil }
+        let others = chords.filter { $0.id != occupant.id }
+        let movedValidation = ChordInputValidator.validateM4GDeviceTokens(reclaim.movedKeys, existingChords: others)
+        guard movedValidation.isValid else { return nil }
+        let now = Date()
+        let moved = ChordEntry(
+            inputKeys: movedValidation.tokens,
+            output: occupant.plainOutput ?? occupant.output,
+            profile: .cc2A1,
+            deploymentTarget: .device,
+            source: occupant.source,
+            enabled: true,
+            createdAt: occupant.createdAt,
+            updatedAt: now
+        )
+        let newValidation = ChordInputValidator.validateM4GDeviceTokens(keys, existingChords: others + [moved])
+        guard newValidation.isValid else { return nil }
+        let added = ChordEntry(
+            inputKeys: newValidation.tokens,
+            output: word,
+            profile: .cc2A1,
+            deploymentTarget: .device,
+            source: source,
+            enabled: true,
+            createdAt: now,
+            updatedAt: now
+        )
+        return [
+            StagedChordChange(kind: .delete, chord: occupant),
+            StagedChordChange(kind: .upsert, chord: moved),
+            StagedChordChange(kind: .upsert, chord: added)
+        ]
+    }
+
     func quickCommitDeviceActionUpsert(input: String, phraseActions: [Int], replacing chord: ChordEntry? = nil) async -> Bool {
         let validation = validateQuickDeviceChordInput(input, replacing: chord)
         guard validation.isValid, let inputActions = validation.rawInputActions else {
@@ -1212,6 +1271,11 @@ final class AppModel: ObservableObject {
 
     func acceptAdvisorCandidate(_ candidate: Candidate, word: String) async {
         let output = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let reclaim = candidate.reclaim, let changes = reclaimChanges(reclaim, keys: candidate.inputKeys, word: output, source: "advisor") {
+            stagedChanges.append(contentsOf: changes)
+            statusText = "Staged: “\(reclaim.output)” moves to \(reclaim.movedKeys.joined(separator: "+")), “\(output)” takes \(candidate.inputKeys.joined(separator: "+"))"
+            return
+        }
         await addChord(
             tokens: candidate.inputKeys,
             output: output,
