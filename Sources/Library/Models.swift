@@ -501,48 +501,12 @@ public struct Candidate: Codable, Hashable, Sendable, Identifiable {
     public let score: Double
     public let hardFailures: [String]
     public let softReasons: [String]
-    /// Set when these keys belong to a chord you barely write, which moves
-    /// to other keys so this word can have them.
-    public let reclaim: ChordReclaim?
 
-    public init(inputKeys: [String], score: Double, hardFailures: [String], softReasons: [String], reclaim: ChordReclaim? = nil) {
+    public init(inputKeys: [String], score: Double, hardFailures: [String], softReasons: [String]) {
         self.inputKeys = inputKeys
         self.score = score
         self.hardFailures = hardFailures
         self.softReasons = softReasons
-        self.reclaim = reclaim
-    }
-}
-
-/// Taking keys from a chord you barely write: it moves, it isn't deleted.
-public struct ChordReclaim: Codable, Hashable, Sendable {
-    public let chordID: UUID
-    public let output: String
-    /// Times you wrote that word in all recorded history.
-    public let uses: Int
-    public let historyDays: Int
-    /// Where the old word moves.
-    public let movedKeys: [String]
-
-    public init(chordID: UUID, output: String, uses: Int, historyDays: Int, movedKeys: [String]) {
-        self.chordID = chordID
-        self.output = output
-        self.uses = uses
-        self.historyDays = historyDays
-        self.movedKeys = movedKeys
-    }
-}
-
-/// How often each word was written, over every day the recorder ran.
-public struct SlotUsage: Sendable {
-    public let uses: [String: Int]
-    public let historyDays: Int
-    public let now: Date
-
-    public init(uses: [String: Int], historyDays: Int, now: Date = .now) {
-        self.uses = uses
-        self.historyDays = historyDays
-        self.now = now
     }
 }
 

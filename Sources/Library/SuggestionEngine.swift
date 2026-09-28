@@ -148,72 +148,6 @@ struct PersonalScoring {
     /// Times you wrote the word in the last 90 days, when known.
     let usage: Int?
     let initials: [String]
-    /// Symbols you put in front of letters to tell chords apart.
-    var namespaceTokens: Set<String> = []
-    fileprivate var hands: HandPositionModel?
-}
-
-/// Which switches you press together in the chords you actually use. A
-/// chord can break every letter rule (`,+a+l+n` for national) and still be
-/// the right one because it sits well under your hands; this learns that
-/// from your own presses rather than from the letters.
-fileprivate struct HandPositionModel {
-    private let pairWeights: [String: Double]
-    private let switchWeights: [String: Double]
-    private let maxPair: Double
-    let isTrained: Bool
-
-    init(existingChords: [ChordEntry], uses: [String: Int]?, definition: ProfileDefinition) {
-        var pairs: [String: Double] = [:]
-        var switches: [String: Double] = [:]
-        var trainedWeight = 0.0
-        for chord in existingChords {
-            let word = (chord.plainOutput ?? chord.output).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let weight = LibraryStyleModel.weight(uses: uses.map { $0[word] ?? 0 })
-            let ids = Self.switchIDs(chord.inputKeys, definition: definition)
-            guard ids.count >= 2 else { continue }
-            trainedWeight += weight
-            for id in ids { switches[id, default: 0] += weight }
-            for (index, first) in ids.enumerated() {
-                for second in ids[(index + 1)...] {
-                    pairs[Self.pairKey(first, second), default: 0] += weight
-                }
-            }
-        }
-        pairWeights = pairs
-        switchWeights = switches
-        maxPair = pairs.values.max() ?? 1
-        isTrained = uses != nil && trainedWeight >= 60
-    }
-
-    static func switchIDs(_ keys: [String], definition: ProfileDefinition) -> [String] {
-        keys.compactMap { definition.placements[$0.lowercased()]?.switchGroup ?? definition.placements[$0.lowercased()].map { "\($0.hand)-\($0.finger)-\($0.row)" } }
-    }
-
-    static func pairKey(_ first: String, _ second: String) -> String {
-        first < second ? "\(first)|\(second)" : "\(second)|\(first)"
-    }
-
-    /// From -10 (switches you never press together) to +10 (your most
-    /// pressed combinations).
-    func score(_ keys: [String], definition: ProfileDefinition) -> (score: Double, reason: String?) {
-        guard isTrained else { return (0, nil) }
-        let ids = Self.switchIDs(keys, definition: definition)
-        guard ids.count >= 2 else { return (0, nil) }
-        var total = 0.0
-        var count = 0.0
-        for (index, first) in ids.enumerated() {
-            for second in ids[(index + 1)...] {
-                total += log1p(pairWeights[Self.pairKey(first, second)] ?? 0) / log1p(maxPair)
-                count += 1
-            }
-        }
-        let familiarity = total / max(count, 1)
-        let score = (familiarity - 0.5) * 20
-        if familiarity >= 0.75 { return (score, "Uses switches you often press together.") }
-        if familiarity <= 0.2 { return (score, "Uses switches you rarely press together.") }
-        return (score, nil)
-    }
 }
 
 public struct SuggestionEngine: Sendable {
@@ -237,8 +171,6 @@ public struct SuggestionEngine: Sendable {
         bannedInputs: Set<String> = [],
         allowReplacingOutput: Bool = false,
         usage: Int? = nil,
-        slotUsage: SlotUsage? = nil,
-        offerReclaims: Bool = true,
         limit: Int = 10
     ) -> [Candidate] {
         let normalizedWord = word
@@ -273,9 +205,7 @@ public struct SuggestionEngine: Sendable {
                 existingInputs: existingInputs,
                 existingInputIdentities: existingInputIdentities,
                 bannedInputs: bannedInputs,
-                usage: usage,
-                slotUsage: slotUsage,
-                offerReclaims: offerReclaims
+                usage: usage
             )
             .prefix(limit)
         )
@@ -421,9 +351,7 @@ public struct SuggestionEngine: Sendable {
         existingInputIdentities: Set<String>,
         bannedInputs: Set<String>,
         includeRejected: Bool = false,
-        usage: Int? = nil,
-        slotUsage: SlotUsage? = nil,
-        offerReclaims: Bool = true
+        usage: Int? = nil
     ) -> [Candidate] {
         let anchorAnalysis = anchorAnalyzer.analysis(for: word)
         // A phrase leans on each word's first letter.
@@ -433,8 +361,7 @@ public struct SuggestionEngine: Sendable {
             .filter { definition.placements[$0] != nil }
         let priorityLetters = orderedUnique((isPhrase ? initials : []) + anchorAnalysis.orderedTokens)
             .filter { $0 != " " && $0 != "space" }
-        let style = LibraryStyleModel(existingChords: existingChords, uses: slotUsage?.uses)
-        let hands = HandPositionModel(existingChords: existingChords, uses: slotUsage?.uses, definition: definition)
+        let style = LibraryStyleModel(existingChords: existingChords)
         let family = FamilyMarkerModel(existingChords: existingChords)
         let neighbors = ChordNeighborIndex(existingChords: existingChords)
         var familyHints: [[String]: LearnedFamilyHint] = [:]
@@ -480,23 +407,6 @@ public struct SuggestionEngine: Sendable {
                             marker: marker.key,
                             learned: marker.learned
                         )
-                    }
-                }
-            }
-        }
-
-        // A symbol key in front of the word's own letters (`/+p+t+c` when
-        // p+t+c is taken) stays easy to remember. Use the symbols your
-        // library already uses that way, most used first.
-        let namespaceTokens = learnedNamespaceTokens(existingChords)
-        if !initials.isEmpty, !isPhrase {
-            let rest = Array(priorityLetters.filter { !initials.contains($0) }.prefix(6))
-            for size in 1...min(2, max(rest.count, 1)) {
-                for combo in combinations(of: rest, taking: size) {
-                    let letters = initials + combo
-                    guard existingInputs.contains(ChordEntry.normalizeInputKeys(letters)) else { continue }
-                    for namespace in namespaceTokens {
-                        insertCandidate([namespace] + letters)
                     }
                 }
             }
@@ -583,9 +493,7 @@ public struct SuggestionEngine: Sendable {
                         familyHint: familyHints[$0],
                         neighbors: neighbors,
                         usage: usage,
-                        initials: isPhrase ? initials : Array(initials.prefix(1)),
-                        namespaceTokens: Set(namespaceTokens),
-                        hands: hands
+                        initials: isPhrase ? initials : Array(initials.prefix(1))
                     )
                 )
             }
@@ -620,109 +528,8 @@ public struct SuggestionEngine: Sendable {
             scored = scoredCandidates()
         }
 
-        if !includeRejected, offerReclaims, let slotUsage {
-            return withReclaims(
-                scored,
-                word: word,
-                usage: usage,
-                slotUsage: slotUsage,
-                profile: profile,
-                existingChords: existingChords,
-                bannedInputs: bannedInputs
-            )
-        }
         return scored
             .filter { includeRejected || $0.hardFailures.isEmpty }
-    }
-
-    /// Adds, second in line, keys that only fail because a chord you barely
-    /// write holds them, when they are clearly better than any free keys.
-    /// That chord moves to the next best keys; nothing is deleted. Usage over
-    /// all your history decides, not recency, so words you use for one
-    /// project at a time keep their chords.
-    private func withReclaims(
-        _ scored: [Candidate],
-        word: String,
-        usage: Int?,
-        slotUsage: SlotUsage,
-        profile: ErgonomicProfile,
-        existingChords: [ChordEntry],
-        bannedInputs: Set<String>
-    ) -> [Candidate] {
-        var valid = scored.filter { $0.hardFailures.isEmpty }
-        guard slotUsage.historyDays >= 30, let bestFree = valid.first else { return valid }
-        let occupants = Dictionary(
-            existingChords.map { (Set($0.inputKeys.map { $0.lowercased() }), $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        let newWordUses = usage ?? 0
-        let isFallback: (Candidate) -> Bool = { candidate in
-            candidate.softReasons.contains {
-                $0.contains("Conflict-free mnemonic fallback") || $0.contains("Long ergonomic fallback")
-            }
-        }
-        let bestComparable = valid.first { !isFallback($0) }?.score ?? (bestFree.score - 16)
-        var reclaims: [Candidate] = []
-        for candidate in scored where !candidate.hardFailures.isEmpty {
-            guard reclaims.count < 2 else { break }
-            guard candidate.hardFailures.allSatisfy({ $0.contains("already exists") }),
-                  let occupant = occupants[Set(candidate.inputKeys)],
-                  !occupant.isStarred,
-                  occupant.actionFlags.isEmpty,
-                  slotUsage.now.timeIntervalSince(occupant.createdAt) > 30 * 86_400 else { continue }
-            let occupantWord = (occupant.plainOutput ?? occupant.output).trimmingCharacters(in: .whitespacesAndNewlines)
-            let key = occupantWord.lowercased()
-            guard !key.isEmpty, key != word else { continue }
-            let uses = slotUsage.uses[key] ?? 0
-            // About once a month or less, and this word matters more.
-            guard uses * 30 <= slotUsage.historyDays, newWordUses >= uses * 3 + 3 else { continue }
-            // Worth offering when these keys are about as good as the best
-            // free ones; it comes second either way. Last-resort chords carry
-            // bonuses for being the only option left, which don't count here.
-            guard candidate.score >= bestComparable - 2 else { continue }
-            let score = candidate.score - 6
-            let remaining = existingChords.filter { $0.id != occupant.id } + [
-                ChordEntry(inputKeys: candidate.inputKeys, output: word, profile: profile, deploymentTarget: .device, source: "reclaim")
-            ]
-            guard let moved = adviseChord(
-                for: key,
-                profile: profile,
-                existingChords: remaining,
-                bannedInputs: bannedInputs,
-                allowReplacingOutput: true,
-                limit: 1
-            ).first else { continue }
-            let times = uses == 0 ? "never written" : "written \(uses)×"
-            let note = "Takes these keys from “\(occupantWord)” (\(times) in \(slotUsage.historyDays) days you typed); it moves to \(moved.inputKeys.joined(separator: "+"))."
-            reclaims.append(Candidate(
-                inputKeys: candidate.inputKeys,
-                score: score,
-                hardFailures: [],
-                softReasons: [note] + candidate.softReasons,
-                reclaim: ChordReclaim(
-                    chordID: occupant.id,
-                    output: occupantWord,
-                    uses: uses,
-                    historyDays: slotUsage.historyDays,
-                    movedKeys: moved.inputKeys
-                )
-            ))
-        }
-        guard !reclaims.isEmpty else { return valid }
-        // Offered, never forced: free keys stay first.
-        valid.insert(contentsOf: reclaims, at: 1)
-        return valid
-    }
-
-    private func learnedNamespaceTokens(_ chords: [ChordEntry]) -> [String] {
-        var counts: [String: Int] = [:]
-        for chord in chords {
-            for token in chord.inputKeys.map({ $0.lowercased() }) where Self.shortWordNamespaceTokens.contains(token) {
-                counts[token, default: 0] += 1
-            }
-        }
-        let learned = counts.filter { $0.value >= 3 }.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }.map(\.key)
-        return Array((learned.isEmpty ? Self.shortWordNamespaceTokens : learned).prefix(3))
     }
 
     private func familyCandidateHints(
@@ -917,29 +724,9 @@ public struct SuggestionEngine: Sendable {
         }
 
         if let personal {
-            // `/+p+t+c`: the word's letters, already used by another chord,
-            // plus one of your marker symbols.
-            let markers = normalizedKeys.filter(personal.namespaceTokens.contains)
-            if markers.count == 1, let marker = markers.first {
-                let letters = normalizedKeys.filter { $0 != marker }
-                if letters.count >= 2,
-                   letters.allSatisfy({ $0.count == 1 && word.contains($0) }),
-                   existingInputs.contains(ChordEntry.normalizeInputKeys(letters)) {
-                    // As common as markers are in your own chords: a clean
-                    // chord wins unless you use markers a lot.
-                    if !usesSymbolNamespace, personal.style.isTrained {
-                        score += 30 * personal.style.markerRate - 6
-                    }
-                    leadReasons.append("Keeps \(letters.joined(separator: "+")) from the word, with `\(marker)` to tell it apart.")
-                }
-            }
             let style = personal.style.score(keys: normalizedKeys, word: word, initials: personal.initials)
             score += style.score
             leadReasons.append(contentsOf: style.reasons)
-            if let hands = personal.hands?.score(normalizedKeys, definition: definition) {
-                score += hands.score
-                if let reason = hands.reason { softReasons.insert(reason, at: 0) }
-            }
             let close = personal.neighbors.neighbors(of: normalizedKeys, word: word)
             if let first = close.first {
                 score -= min(Double(close.count) * 3, 9)
