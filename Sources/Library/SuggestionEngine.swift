@@ -153,65 +153,143 @@ struct PersonalScoring {
     fileprivate var hands: HandPositionModel?
 }
 
-/// Which switches you press together in the chords you actually use. A
-/// chord can break every letter rule (`,+a+l+n` for national) and still be
-/// the right one because it sits well under your hands; this learns that
-/// from your own presses rather than from the letters.
+/// How well a chord sits under your hands, learned from the chords you use.
+/// For each hand it looks at every pair of positions (switch and direction)
+/// the chord presses: pairs you already press together are easy; pairs you
+/// never press fall back to anatomy. The thumb moves independently of the
+/// fingers, so thumb pairs are easy; neighbouring fingers moving in
+/// different directions (the ring finger pushing sideways while the middle
+/// finger pulls down) are hard. The letters don't matter here: `,+a+l+n` can
+/// break letter rules and still sit well.
 fileprivate struct HandPositionModel {
+    struct Position: Hashable {
+        let id: String
+        let hand: String
+        /// 0 pinky … 3 index, 4 thumb.
+        let finger: Int
+        /// 0 east, 1 north, 2 west, 3 south.
+        let direction: Int
+    }
+
     private let pairWeights: [String: Double]
-    private let switchWeights: [String: Double]
-    private let maxPair: Double
+    private let pairReference: Double
+    /// Three positions on one hand pressed together, by weight.
+    private let tripleWeights: [String: Double]
     let isTrained: Bool
 
     init(existingChords: [ChordEntry], uses: [String: Int]?, definition: ProfileDefinition) {
         var pairs: [String: Double] = [:]
-        var switches: [String: Double] = [:]
+        var triples: [String: Double] = [:]
         var trainedWeight = 0.0
         for chord in existingChords {
             let word = (chord.plainOutput ?? chord.output).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let weight = LibraryStyleModel.weight(uses: uses.map { $0[word] ?? 0 })
-            let ids = Self.switchIDs(chord.inputKeys, definition: definition)
-            guard ids.count >= 2 else { continue }
+            guard weight >= 1 else { continue }
+            let hands = Self.handPositions(chord.inputKeys, definition: definition)
+            guard !hands.isEmpty else { continue }
             trainedWeight += weight
-            for id in ids { switches[id, default: 0] += weight }
-            for (index, first) in ids.enumerated() {
-                for second in ids[(index + 1)...] {
-                    pairs[Self.pairKey(first, second), default: 0] += weight
+            for positions in hands.values {
+                for (index, first) in positions.enumerated() {
+                    for second in positions[(index + 1)...] {
+                        pairs[Self.pairKey(first, second), default: 0] += weight
+                    }
+                }
+                for triple in Self.triples(positions) {
+                    triples[Self.tripleKey(triple), default: 0] += weight
                 }
             }
         }
+        tripleWeights = triples
+        let sorted = pairs.values.sorted()
+        // The 75th percentile: a pair as familiar as your usual ones.
+        pairReference = sorted.isEmpty ? 1 : max(sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.75))], 1)
         pairWeights = pairs
-        switchWeights = switches
-        maxPair = pairs.values.max() ?? 1
         isTrained = uses != nil && trainedWeight >= 60
     }
 
-    static func switchIDs(_ keys: [String], definition: ProfileDefinition) -> [String] {
-        keys.compactMap { definition.placements[$0.lowercased()]?.switchGroup ?? definition.placements[$0.lowercased()].map { "\($0.hand)-\($0.finger)-\($0.row)" } }
+    static func handPositions(_ keys: [String], definition: ProfileDefinition) -> [String: [Position]] {
+        var hands: [String: Set<Position>] = [:]
+        for key in keys {
+            guard let placement = definition.placements[key.lowercased()] else { continue }
+            let position = Position(
+                id: "\(placement.switchGroup ?? "\(placement.finger)-\(placement.row)")#\(placement.column)",
+                hand: placement.hand.rawValue,
+                finger: placement.finger,
+                direction: placement.column
+            )
+            hands[position.hand, default: []].insert(position)
+        }
+        return hands.mapValues { $0.sorted { $0.id < $1.id } }
     }
 
-    static func pairKey(_ first: String, _ second: String) -> String {
-        first < second ? "\(first)|\(second)" : "\(second)|\(first)"
-    }
-
-    /// From -10 (switches you never press together) to +10 (your most
-    /// pressed combinations).
-    func score(_ keys: [String], definition: ProfileDefinition) -> (score: Double, reason: String?) {
-        guard isTrained else { return (0, nil) }
-        let ids = Self.switchIDs(keys, definition: definition)
-        guard ids.count >= 2 else { return (0, nil) }
-        var total = 0.0
-        var count = 0.0
-        for (index, first) in ids.enumerated() {
-            for second in ids[(index + 1)...] {
-                total += log1p(pairWeights[Self.pairKey(first, second)] ?? 0) / log1p(maxPair)
-                count += 1
+    private static func triples(_ positions: [Position]) -> [[Position]] {
+        guard positions.count >= 3 else { return [] }
+        var result: [[Position]] = []
+        for a in 0..<positions.count {
+            for b in (a + 1)..<positions.count {
+                for c in (b + 1)..<positions.count {
+                    result.append([positions[a], positions[b], positions[c]])
+                }
             }
         }
-        let familiarity = total / max(count, 1)
-        let score = (familiarity - 0.5) * 20
-        if familiarity >= 0.75 { return (score, "Uses switches you often press together.") }
-        if familiarity <= 0.2 { return (score, "Uses switches you rarely press together.") }
+        return result
+    }
+
+    private static func tripleKey(_ triple: [Position]) -> String {
+        triple.map(\.id).sorted().joined(separator: "|")
+    }
+
+    private static func pairKey(_ first: Position, _ second: Position) -> String {
+        first.id < second.id ? "\(first.id)|\(second.id)" : "\(second.id)|\(first.id)"
+    }
+
+    /// For a pair you never press together: how easy it should be anyway.
+    private static func anatomy(_ first: Position, _ second: Position) -> Double {
+        if first.finger == 4 || second.finger == 4 { return 0.6 }
+        if first.finger == second.finger { return 0.2 }
+        let vertical: Set<Int> = [1, 3]
+        let bothVertical = vertical.contains(first.direction) && vertical.contains(second.direction)
+        if abs(first.finger - second.finger) == 1 {
+            // Neighbours: fine moving the same way, hard otherwise.
+            return bothVertical && first.direction == second.direction ? 0.5 : 0.1
+        }
+        return bothVertical ? 0.45 : 0.3
+    }
+
+    private func pairFamiliarity(_ first: Position, _ second: Position) -> Double {
+        let weight = pairWeights[Self.pairKey(first, second)] ?? 0
+        let learned = min(log1p(weight) / log1p(pairReference), 1)
+        return max(learned, weight > 0 ? 0.3 : Self.anatomy(first, second))
+    }
+
+    /// The hardest pair on either hand, from 0 (hard) to 1 (a pair you press
+    /// all the time). Nil when there isn't enough history.
+    func familiarity(_ keys: [String], definition: ProfileDefinition) -> Double? {
+        guard isTrained else { return nil }
+        var worst = 1.0
+        for positions in Self.handPositions(keys, definition: definition).values {
+            for (index, first) in positions.enumerated() {
+                for second in positions[(index + 1)...] {
+                    worst = min(worst, pairFamiliarity(first, second))
+                }
+            }
+            // Three keys on one hand you have never pressed together are
+            // hard even when each pair is familiar.
+            for triple in Self.triples(positions) where (tripleWeights[Self.tripleKey(triple)] ?? 0) == 0 {
+                let thumbs = triple.filter { $0.finger == 4 }.count
+                worst = min(worst, thumbs > 0 ? 0.3 : 0.2)
+            }
+        }
+        return worst
+    }
+
+    /// From -20 (fingers you can't coordinate) to +6 (pairs you press all
+    /// the time).
+    func score(_ keys: [String], definition: ProfileDefinition) -> (score: Double, reason: String?) {
+        guard let familiarity = familiarity(keys, definition: definition) else { return (0, nil) }
+        let score = familiarity >= 0.5 ? (familiarity - 0.5) * 12 : (familiarity - 0.5) * 50
+        if familiarity >= 0.8 { return (score, "Each hand presses finger pairs you already use.") }
+        if familiarity <= 0.2 { return (score, "Two fingers would move in ways you never combine.") }
         return (score, nil)
     }
 }
@@ -722,7 +800,8 @@ public struct SuggestionEngine: Sendable {
             }
         }
         let learned = counts.filter { $0.value >= 3 }.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }.map(\.key)
-        return Array((learned.isEmpty ? Self.shortWordNamespaceTokens : learned).prefix(3))
+        // Every marker you use; the hand model picks the one that sits well.
+        return Array((learned.isEmpty ? Self.shortWordNamespaceTokens : learned).prefix(6))
     }
 
     private func familyCandidateHints(

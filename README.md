@@ -174,7 +174,9 @@ start from each word's first letter.
 
 It learns mostly from the chords you use: each chord counts by how often you
 write its word, so never-used chords barely shape the suggestions. It also
-learns which switches you press together in those chords, since a chord can
+learns how your fingers move together in those chords (thumb pairs are easy;
+neighbouring fingers moving in different directions are hard; three keys on one
+hand you never press together count as hard), since a chord can
 break the letter rules (`,+a+l+n` for national) and still sit well under your
 hands. When a word's natural letters are taken, it offers them with one of the
 marker symbols you use (`/+p+t+c`), about as often as you use markers yourself.
