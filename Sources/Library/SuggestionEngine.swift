@@ -677,11 +677,12 @@ public struct SuggestionEngine: Sendable {
             }
 
             hardFailures.append(contentsOf: m4gPhysicalModel.hardConflictReasons(for: normalizedKeys))
-            // Possible, but harder than pressing separate switches: only
-            // chosen when the cleaner options are taken.
+            // A diagonal press fires two directions of one switch. It works
+            // (a rare chord like c+k), but it isn't something to learn for
+            // new chords, so suggestions never need one. Chords you enter
+            // yourself are still accepted.
             for diagonal in m4gPhysicalModel.diagonalPresses(for: normalizedKeys) {
-                score -= 20
-                softReasons.append(diagonal)
+                hardFailures.append(diagonal)
             }
         }
 
@@ -928,6 +929,7 @@ public struct SuggestionEngine: Sendable {
             if let physicalModel = definition.m4gPhysicalModel {
                 return ActionCodec.chordActions(forTokens: tokens) != nil
                     && physicalModel.hardConflictReasons(for: tokens).isEmpty
+                    && physicalModel.diagonalPresses(for: tokens).isEmpty
             }
             return true
         }
@@ -939,6 +941,7 @@ public struct SuggestionEngine: Sendable {
                 if let physicalModel = definition.m4gPhysicalModel {
                     return anchors.allSatisfy(availableTokens.contains)
                         && physicalModel.hardConflictReasons(for: anchors).isEmpty
+                        && physicalModel.diagonalPresses(for: anchors).isEmpty
                 }
                 return anchors.allSatisfy(availableTokens.contains)
             }

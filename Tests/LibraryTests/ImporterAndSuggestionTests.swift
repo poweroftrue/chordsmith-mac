@@ -286,11 +286,8 @@ final class ImporterAndSuggestionTests: XCTestCase {
         let candidates = suggestion?.candidates ?? []
         XCTAssertFalse(candidates.isEmpty)
         // e and r sit on neighbouring directions of one switch: a diagonal
-        // press, allowed but never preferred.
-        XCTAssertFalse(Set(candidates[0].inputKeys).isSuperset(of: ["e", "r"]))
-        XCTAssertTrue(candidates.filter { Set($0.inputKeys).isSuperset(of: ["e", "r"]) }.allSatisfy { candidate in
-            candidate.softReasons.contains { $0.contains("Diagonal press") }
-        })
+        // press, which suggestions never need.
+        XCTAssertTrue(candidates.filter { Set($0.inputKeys).isSuperset(of: ["e", "r"]) }.isEmpty, "suggestions never need a diagonal press")
     }
 
     func testOppositeDirectionsConflictButNeighboursPressDiagonally() {
@@ -522,12 +519,10 @@ final class ImporterAndSuggestionTests: XCTestCase {
         )
 
         // a and t share a switch in neighbouring directions: a diagonal
-        // press, allowed with a warning and never the first choice.
+        // press, which suggestions never need.
         XCTAssertFalse(M4GPhysicalModel.defaultA1.diagonalPresses(for: ["a", "t"]).isEmpty)
         XCTAssertNotEqual(Set(candidates.first?.inputKeys ?? []), Set(["a", "t"]))
-        XCTAssertTrue(candidates.filter { Set($0.inputKeys).isSuperset(of: ["a", "t"]) }.allSatisfy { candidate in
-            candidate.softReasons.contains { $0.contains("Diagonal press") }
-        })
+        XCTAssertTrue(candidates.filter { Set($0.inputKeys).isSuperset(of: ["a", "t"]) }.isEmpty, "suggestions never need a diagonal press")
     }
 
     func testDupRightThumbLaneConflictsAreRejected() throws {
@@ -655,9 +650,7 @@ final class ImporterAndSuggestionTests: XCTestCase {
         XCTAssertTrue(candidates.contains { candidate in
             Set(["r", "s", "t"]).isSubset(of: Set(candidate.inputKeys)) && candidate.inputKeys.count >= 4
         })
-        XCTAssertTrue(candidates.filter { Set($0.inputKeys).isSuperset(of: ["a", "t"]) }.allSatisfy { candidate in
-            candidate.softReasons.contains { $0.contains("Diagonal press") }
-        })
+        XCTAssertTrue(candidates.filter { Set($0.inputKeys).isSuperset(of: ["a", "t"]) }.isEmpty, "suggestions never need a diagonal press")
     }
 
     func testSmartLongFallbackDoesNotTriggerWhenCompactCoreIsValid() {
@@ -713,9 +706,7 @@ final class ImporterAndSuggestionTests: XCTestCase {
 
         // m and v are neighbours on one thumb switch (diagonal); with a key
         // from the other thumb switch it can't be pressed.
-        XCTAssertTrue(accepted.filter { Set($0.inputKeys).isSuperset(of: ["m", "v"]) }.allSatisfy { candidate in
-            candidate.softReasons.contains { $0.contains("Diagonal press") }
-        })
+        XCTAssertTrue(accepted.filter { Set($0.inputKeys).isSuperset(of: ["m", "v"]) }.isEmpty, "suggestions never need a diagonal press")
         XCTAssertTrue(rejected.allSatisfy { candidate in !candidate.hardFailures.isEmpty })
     }
 

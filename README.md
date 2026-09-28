@@ -172,7 +172,7 @@ for words you write often, and chords one key away from an unrelated chord are
 penalised because a partial press would type the other word. Two-word phrases
 start from each word's first letter.
 
-Hard validation always wins. A candidate is rejected if it conflicts with an existing raw input, uses unsupported actions, repeats a physical key, needs opposite directions (or three) of one switch, or presses both switches of a thumb lane. Two neighbouring directions of one switch are a diagonal press: allowed, but ranked below cleaner options.
+Hard validation always wins. A candidate is rejected if it conflicts with an existing raw input, uses unsupported actions, repeats a physical key, needs two or more directions of one switch, or presses both switches of a thumb lane. Suggestions never need a diagonal press (two neighbouring directions of one switch); a chord you enter yourself may use one.
 
 ## Window And Shortcuts
 
