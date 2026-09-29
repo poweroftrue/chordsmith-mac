@@ -217,13 +217,13 @@ final class ShorthandEventTests: XCTestCase {
 final class MashedChordTests: XCTestCase {
     private let matcher: ShorthandMatcher = {
         let chords = [
-            ChordEntry(inputKeys: ["a", "b", "t"], output: "about", profile: .cc2A1, deploymentTarget: .device, source: "test"),
+            ChordEntry(inputKeys: ["d", "l", "m"], output: "model", profile: .cc2A1, deploymentTarget: .device, source: "test"),
             ChordEntry(inputKeys: ["o", "n"], output: "only", profile: .cc2A1, deploymentTarget: .device, source: "test")
         ]
-        let words: Set<String> = ["bat", "tab", "on", "no"]
+        let words: Set<String> = ["on", "no"]
         return ShorthandMatcher(catalog: ShorthandBuilder.build(chords: chords, realWords: words), realWords: words)
     }()
-    private let codes: [Character: UInt16] = ["a": 0, "b": 11, "t": 17, "o": 31, "n": 45, "x": 7, " ": 49]
+    private let codes: [Character: UInt16] = ["d": 2, "l": 37, "m": 46, "o": 31, "n": 45, "x": 7, " ": 49]
 
     private func send(_ key: ShorthandTyper.Key, _ typer: inout ShorthandTyper, mash: Bool = true) -> ShorthandTyper.Action {
         let matcher = self.matcher
@@ -255,44 +255,41 @@ final class MashedChordTests: XCTestCase {
 
     func testKeysPressedTogetherBecomeTheWordWithASpace() {
         var typer = ShorthandTyper()
-        guard case .replace(let chord) = mash("abt", down: [0, 0.012, 0.025], up: [0.11, 0.12, 0.125], &typer) else {
+        guard case .replace(let chord) = mash("mdl", down: [0, 0.012, 0.025], up: [0.11, 0.12, 0.125], &typer) else {
             return XCTFail("expected a chord")
         }
         XCTAssertEqual(chord.kind, .chord)
         XCTAssertEqual(chord.deleteCount, 3)
-        XCTAssertEqual(chord.insert, "about ")
+        XCTAssertEqual(chord.insert, "model ")
         XCTAssertEqual(typer.lastChordAttempt?.matched, true)
     }
 
     func testRolledTypingIsNeverAChord() {
         var typer = ShorthandTyper()
         // Each key let go before the next goes down.
-        XCTAssertEqual(mash("abt", down: [0, 0.09, 0.18], up: [0.07, 0.16, 0.25], &typer), .pass)
+        XCTAssertEqual(mash("mdl", down: [0, 0.09, 0.18], up: [0.07, 0.16, 0.25], &typer), .pass)
         // Fast rolling with overlap: a new key goes down after one was let go.
         var fast = ShorthandTyper()
-        XCTAssertEqual(mash("abt", down: [0, 0.05, 0.1], up: [0.08, 0.13, 0.17], &fast), .pass)
+        XCTAssertEqual(mash("mdl", down: [0, 0.05, 0.1], up: [0.08, 0.13, 0.17], &fast), .pass)
         // Everything down at once but pressed slowly, as in a lazy roll.
         var slow = ShorthandTyper()
-        XCTAssertEqual(mash("abt", down: [0, 0.07, 0.14], up: [0.2, 0.21, 0.22], &slow), .pass)
+        XCTAssertEqual(mash("mdl", down: [0, 0.07, 0.14], up: [0.2, 0.21, 0.22], &slow), .pass)
     }
 
-    func testRealWordsNeedADeliberatePress() {
-        var loose = ShorthandTyper()
-        XCTAssertEqual(mash("on", down: [0, 0.035], up: [0.09, 0.1], &loose), .pass, "`on` rolled quickly stays `on`")
-        var tight = ShorthandTyper()
-        guard case .replace(let chord) = mash("on", down: [0, 0.01], up: [0.1, 0.11], &tight) else {
-            return XCTFail("a firm press is a chord")
-        }
-        XCTAssertEqual(chord.insert, "only ")
+    func testTwoKeysAreNeverAChord() {
+        // Fast typing overlaps the first two letters of a word all the time.
+        var typer = ShorthandTyper()
+        XCTAssertEqual(mash("on", down: [0, 0.01], up: [0.1, 0.11], &typer), .pass)
+        XCTAssertNil(typer.lastChordAttempt)
     }
 
     func testSpaceAfterAChordIsDroppedAndPunctuationTucksIn() {
         var typer = ShorthandTyper()
-        mash("abt", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &typer)
+        mash("mdl", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &typer)
         XCTAssertEqual(send(.text(" ", isRepeat: false, at: 0.3, keyCode: 49), &typer), .swallow)
 
         var other = ShorthandTyper()
-        mash("abt", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &other)
+        mash("mdl", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &other)
         guard case .replace(let edit) = send(.text(",", isRepeat: false, at: 0.3, keyCode: 43), &other) else {
             return XCTFail("expected the comma to replace the space")
         }
@@ -302,44 +299,44 @@ final class MashedChordTests: XCTestCase {
 
     func testBackspaceUndoesAChord() {
         var typer = ShorthandTyper()
-        mash("abt", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &typer)
+        mash("mdl", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &typer)
         guard case .replace(let undo) = send(.backspace(isRepeat: false), &typer) else { return XCTFail("expected undo") }
         XCTAssertEqual(undo.deleteCount, 6)
-        XCTAssertEqual(undo.insert, "abt")
+        XCTAssertEqual(undo.insert, "mdl")
     }
 
     func testHoldingAChordDoesNotRepeatLetters() {
         var typer = ShorthandTyper()
-        _ = send(.text("a", isRepeat: false, at: 0, keyCode: 0), &typer)
-        _ = send(.text("b", isRepeat: false, at: 0.01, keyCode: 11), &typer)
-        XCTAssertEqual(send(.text("b", isRepeat: true, at: 0.5, keyCode: 11), &typer), .swallow)
+        _ = send(.text("m", isRepeat: false, at: 0, keyCode: 46), &typer)
+        _ = send(.text("d", isRepeat: false, at: 0.01, keyCode: 2), &typer)
+        XCTAssertEqual(send(.text("d", isRepeat: true, at: 0.5, keyCode: 2), &typer), .swallow)
     }
 
     func testOnlyAtTheStartOfAWordAndOnlyWhenEnabled() {
         var typer = ShorthandTyper()
         _ = send(.text("x", isRepeat: false, at: 0, keyCode: 7), &typer)
         _ = send(.keyUp(keyCode: 7, at: 0.05), &typer)
-        XCTAssertEqual(mash("abt", down: [0.2, 0.21, 0.22], up: [0.3, 0.3, 0.31], &typer), .pass)
+        XCTAssertEqual(mash("mdl", down: [0.2, 0.21, 0.22], up: [0.3, 0.3, 0.31], &typer), .pass)
 
         var off = ShorthandTyper()
-        XCTAssertEqual(mash("abt", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &off, mash: false), .pass)
+        XCTAssertEqual(mash("mdl", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &off, mash: false), .pass)
     }
 
     func testAfterUndoingAndDeletingTheLettersYouCanChordAgain() {
         var typer = ShorthandTyper()
-        mash("abt", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &typer)
+        mash("mdl", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &typer)
         _ = send(.backspace(isRepeat: false), &typer)          // undo: `abt` is back
         for _ in 0..<3 { _ = send(.backspace(isRepeat: false), &typer) }  // delete it
-        guard case .replace(let chord) = mash("abt", down: [1, 1.01, 1.02], up: [1.1, 1.1, 1.11], &typer) else {
+        guard case .replace(let chord) = mash("mdl", down: [1, 1.01, 1.02], up: [1.1, 1.1, 1.11], &typer) else {
             return XCTFail("back at the start of the word, so the chord works again")
         }
-        XCTAssertEqual(chord.insert, "about ")
+        XCTAssertEqual(chord.insert, "model ")
     }
 
     func testChordsBackToBack() {
         var typer = ShorthandTyper()
-        mash("abt", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &typer)
-        guard case .replace = mash("on", down: [0.2, 0.205], up: [0.3, 0.31], &typer) else {
+        mash("mdl", down: [0, 0.01, 0.02], up: [0.1, 0.1, 0.11], &typer)
+        guard case .replace = mash("mdl", down: [0.2, 0.205, 0.21], up: [0.3, 0.31, 0.31], &typer) else {
             return XCTFail("the chord's space starts the next word")
         }
     }
@@ -352,7 +349,7 @@ final class MashedChordTests: XCTestCase {
         }
         _ = send(.backspace(isRepeat: false), &typer)
         _ = send(.backspace(isRepeat: false), &typer)
-        guard case .replace = mash("abt", down: [1, 1.01, 1.02], up: [1.1, 1.1, 1.11], &typer) else {
+        guard case .replace = mash("mdl", down: [1, 1.01, 1.02], up: [1.1, 1.1, 1.11], &typer) else {
             return XCTFail("the cursor is after `hi `")
         }
     }

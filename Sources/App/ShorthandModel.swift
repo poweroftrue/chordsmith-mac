@@ -38,7 +38,7 @@ enum ShorthandStatus: Equatable {
         case .pausedInApp:
             return "You paused shorthands in this app. Everywhere else they work as usual."
         case .active:
-            return "Press a chord's keys together, or type its three letters then Space. Backspace straight after puts your letters back."
+            return "Press a chord's three keys together, or type its three letters then Space. Backspace straight after puts your letters back."
         case .failed:
             return "The keyboard hook couldn't start. Quit and reopen Chordsmith, or check Accessibility access."
         }

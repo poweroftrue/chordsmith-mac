@@ -49,8 +49,32 @@ final class ShorthandBuilderTests: XCTestCase {
         let matcher = ShorthandMatcher(catalog: catalog, realWords: words)
         XCTAssertTrue(catalog.shorthands.allSatisfy { $0.kind == .pressTogether && $0.tokens.isEmpty })
         XCTAssertNil(matcher.match("hv"))
-        XCTAssertEqual(matcher.matchChord("vh")?.text, "have")
-        XCTAssertEqual(matcher.matchChord("te")?.text, "the")
+        XCTAssertNil(matcher.matchChord("hv"), "two keys overlap in fast typing")
+        let byWord = Dictionary(uniqueKeysWithValues: catalog.shorthands.map { ($0.word, $0) })
+        XCTAssertEqual(byWord["have"]?.pressKeys, "hvk", "the Forge keys, plus K since H and J share a finger")
+        XCTAssertEqual(byWord["the"]?.pressKeys, "tej", "the Forge keys, plus J")
+        XCTAssertEqual(matcher.matchChord("jte")?.text, "the")
+    }
+
+    func testPressKeysNeverStartAWordYouType() throws {
+        // search is s+h on the Forge, but typing should or she fast
+        // overlaps s, h and the next letter.
+        let usage = ["search": 40, "should": 80, "she": 20, "show": 10]
+        let catalog = ShorthandBuilder.build(chords: [chord(["s", "h"], "search")], realWords: words, usage: usage)
+        let keys = try XCTUnwrap(catalog.shorthands.first?.pressKeys)
+        XCTAssertEqual(keys.count, 3)
+        let starts = ShorthandBuilder.rolloverStarts(vocabulary: usage, realWords: words)
+        XCTAssertFalse(starts.contains(ShorthandLetters.signature(keys)))
+        let matcher = ShorthandMatcher(catalog: catalog, realWords: words)
+        XCTAssertNil(matcher.matchChord("sh"))
+        XCTAssertNil(matcher.matchChord("sho"))
+        XCTAssertNil(matcher.matchChord("she"))
+    }
+
+    func testOneAndTwoLetterWordsAreJustTyped() {
+        let catalog = ShorthandBuilder.build(chords: [chord(["a", "g"], "a"), chord(["i", "y"], "I")], realWords: words)
+        XCTAssertTrue(catalog.shorthands.isEmpty)
+        XCTAssertEqual(Set(catalog.skipped.map(\.reason)), [.shortWord])
     }
 
     func testChordsThatSpellTheWordOrAreNotTextAreSkipped() {
@@ -171,10 +195,10 @@ final class LaptopErgonomicsTests: XCTestCase {
     }
 
     func testComfortableChordsKeepTheirKeys() throws {
-        let catalog = ShorthandBuilder.build(chords: [chord(["e", "t"], "the")], realWords: [])
-        let the = try XCTUnwrap(catalog.shorthands.first)
-        XCTAssertEqual(the.pressKeys, "te")
-        XCTAssertFalse(the.pressAdjusted)
+        let catalog = ShorthandBuilder.build(chords: [chord(["d", "l", "m"], "model")], realWords: [])
+        let model = try XCTUnwrap(catalog.shorthands.first)
+        XCTAssertEqual(model.pressKeys, "mdl")
+        XCTAssertFalse(model.pressAdjusted)
     }
 
     func testChordsThatShareAFingerGetEasierKeysFromTheirOwn() throws {

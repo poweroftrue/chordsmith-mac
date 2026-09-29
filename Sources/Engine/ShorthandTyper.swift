@@ -310,7 +310,7 @@ public struct ShorthandTyper: Sendable {
             return .pass
         }
         press = nil
-        guard options.mashChords, current.characters.count >= 2, let firstRelease = current.firstRelease else { return .pass }
+        guard options.mashChords, current.characters.count == ShorthandBuilder.pressKeyCount, let firstRelease = current.firstRelease else { return .pass }
 
         let typed = String(current.characters)
         let spread = current.lastPress - current.firstPress

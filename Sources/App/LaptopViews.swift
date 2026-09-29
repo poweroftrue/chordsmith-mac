@@ -309,7 +309,7 @@ struct ShorthandRow: View {
                             LetterKeys(letters: keys, together: true)
                         }
                         .help(shorthand.pressAdjusted
-                            ? "The M4G keys share a finger or are a stretch on a laptop, so these are easier to press together."
+                            ? "Three keys on three fingers that no word you type starts with, so typing fast never sets them off. J or K joins in when the word's own letters aren't safe."
                             : "Press these keys at the same moment.")
                     }
                 }
